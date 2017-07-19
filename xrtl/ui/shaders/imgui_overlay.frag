@@ -12,14 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "xrtl/gfx/es3/es3_command_fence.h"
+precision highp float;
 
-namespace xrtl {
-namespace gfx {
-namespace es3 {
+layout(push_constant) uniform PushConstants {
+  mat4 proj_matrix;
+} push_constants;
 
-//
+layout(set = 0, binding = 0) uniform sampler2D image_sampler;
 
-}  // namespace es3
-}  // namespace gfx
-}  // namespace xrtl
+layout(location = 0) in vec2 vtx_uv;
+layout(location = 1) in vec4 vtx_color;
+
+layout(location = 0) out vec4 out_color;
+
+void main() {
+  vec4 tex_sample = texture(image_sampler, vtx_uv);
+  out_color = vtx_color * tex_sample;
+}

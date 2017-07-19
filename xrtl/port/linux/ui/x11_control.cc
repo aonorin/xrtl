@@ -14,6 +14,10 @@
 
 #include "xrtl/port/linux/ui/x11_control.h"
 
+#include <X11/Xlib.h>
+
+#include <utility>
+
 #include "xrtl/base/debugging.h"
 #include "xrtl/base/flags.h"
 #include "xrtl/base/logging.h"
@@ -24,6 +28,334 @@ DEFINE_string(display, "",
 namespace xrtl {
 namespace ui {
 
+namespace {
+
+// Attempts to map an X11 system key code to a VirtualKey.
+// Returns VirtualKey::kNone if the key could not be mapped.
+VirtualKey MapVirtualKey(int system_code) {
+  switch (system_code) {
+    default:
+      return VirtualKey::kNone;
+
+    case XK_BackSpace:
+      return VirtualKey::kBackspace;
+    case XK_Tab:
+      return VirtualKey::kTab;
+
+    case XK_Clear:
+      return VirtualKey::kClear;
+    case XK_Return:
+      return VirtualKey::kEnter;
+
+    case XK_Shift_L:
+    case XK_Shift_R:
+      return VirtualKey::kShift;
+    case XK_Control_L:
+    case XK_Control_R:
+      return VirtualKey::kControl;
+    case XK_Alt_L:
+    case XK_Alt_R:
+      return VirtualKey::kAlt;
+    case XK_Pause:
+      return VirtualKey::kPause;
+    case XK_Caps_Lock:
+      return VirtualKey::kCapsLock;
+
+    case XK_Katakana:
+      return VirtualKey::kImeKana;
+    case XK_Hangul:
+      return VirtualKey::kImeHangul;
+    case XK_Kanji:
+      return VirtualKey::kImeKanji;
+    case XK_Hangul_Hanja:
+      return VirtualKey::kImeHanja;
+
+    case XK_Escape:
+      return VirtualKey::kEscape;
+
+    case XK_space:
+      return VirtualKey::kSpace;
+    case XK_Next:
+      return VirtualKey::kPageUp;
+    case XK_Prior:
+      return VirtualKey::kPageDown;
+    case XK_End:
+      return VirtualKey::kEnd;
+    case XK_Home:
+      return VirtualKey::kHome;
+    case XK_Left:
+      return VirtualKey::kLeft;
+    case XK_Up:
+      return VirtualKey::kUp;
+    case XK_Right:
+      return VirtualKey::kRight;
+    case XK_Down:
+      return VirtualKey::kDown;
+    case XK_Select:
+      return VirtualKey::kSelect;
+    case XK_Execute:
+      return VirtualKey::kExecute;
+    case XK_Print:
+      return VirtualKey::kPrintScreen;
+    case XK_Insert:
+      return VirtualKey::kInsert;
+    case XK_Delete:
+      return VirtualKey::kDelete;
+    case XK_Help:
+      return VirtualKey::kHelp;
+
+    case XK_0:
+      return VirtualKey::k0;
+    case XK_1:
+      return VirtualKey::k1;
+    case XK_2:
+      return VirtualKey::k2;
+    case XK_3:
+      return VirtualKey::k3;
+    case XK_4:
+      return VirtualKey::k4;
+    case XK_5:
+      return VirtualKey::k5;
+    case XK_6:
+      return VirtualKey::k6;
+    case XK_7:
+      return VirtualKey::k7;
+    case XK_8:
+      return VirtualKey::k8;
+    case XK_9:
+      return VirtualKey::k9;
+
+    case XK_a:
+      return VirtualKey::kA;
+    case XK_b:
+      return VirtualKey::kB;
+    case XK_c:
+      return VirtualKey::kC;
+    case XK_d:
+      return VirtualKey::kD;
+    case XK_e:
+      return VirtualKey::kE;
+    case XK_f:
+      return VirtualKey::kF;
+    case XK_g:
+      return VirtualKey::kG;
+    case XK_h:
+      return VirtualKey::kH;
+    case XK_i:
+      return VirtualKey::kI;
+    case XK_j:
+      return VirtualKey::kJ;
+    case XK_k:
+      return VirtualKey::kK;
+    case XK_l:
+      return VirtualKey::kL;
+    case XK_m:
+      return VirtualKey::kM;
+    case XK_n:
+      return VirtualKey::kN;
+    case XK_o:
+      return VirtualKey::kO;
+    case XK_p:
+      return VirtualKey::kP;
+    case XK_q:
+      return VirtualKey::kQ;
+    case XK_r:
+      return VirtualKey::kR;
+    case XK_s:
+      return VirtualKey::kS;
+    case XK_t:
+      return VirtualKey::kT;
+    case XK_u:
+      return VirtualKey::kU;
+    case XK_v:
+      return VirtualKey::kV;
+    case XK_w:
+      return VirtualKey::kW;
+    case XK_x:
+      return VirtualKey::kX;
+    case XK_y:
+      return VirtualKey::kY;
+    case XK_z:
+      return VirtualKey::kZ;
+
+    case XK_Meta_L:
+      return VirtualKey::kLeftMeta;
+    case XK_Meta_R:
+      return VirtualKey::kRightMeta;
+    case XK_Menu:
+      return VirtualKey::kApps;
+
+    case XF86XK_Sleep:
+      return VirtualKey::kSleep;
+
+    case XK_KP_0:
+      return VirtualKey::kNumpad0;
+    case XK_KP_1:
+      return VirtualKey::kNumpad1;
+    case XK_KP_2:
+      return VirtualKey::kNumpad2;
+    case XK_KP_3:
+      return VirtualKey::kNumpad3;
+    case XK_KP_4:
+      return VirtualKey::kNumpad4;
+    case XK_KP_5:
+      return VirtualKey::kNumpad5;
+    case XK_KP_6:
+      return VirtualKey::kNumpad6;
+    case XK_KP_7:
+      return VirtualKey::kNumpad7;
+    case XK_KP_8:
+      return VirtualKey::kNumpad8;
+    case XK_KP_9:
+      return VirtualKey::kNumpad9;
+    case XK_KP_Multiply:
+      return VirtualKey::kNumpadMultiply;
+    case XK_KP_Add:
+      return VirtualKey::kNumpadAdd;
+    case XK_KP_Separator:
+      return VirtualKey::kNumpadSlash;
+    case XK_KP_Subtract:
+      return VirtualKey::kNumpadSubtract;
+    case XK_KP_Decimal:
+      return VirtualKey::kNumpadDecimal;
+    case XK_KP_Divide:
+      return VirtualKey::kNumpadDivide;
+
+    case XK_F1:
+      return VirtualKey::kF1;
+    case XK_F2:
+      return VirtualKey::kF2;
+    case XK_F3:
+      return VirtualKey::kF3;
+    case XK_F4:
+      return VirtualKey::kF4;
+    case XK_F5:
+      return VirtualKey::kF5;
+    case XK_F6:
+      return VirtualKey::kF6;
+    case XK_F7:
+      return VirtualKey::kF7;
+    case XK_F8:
+      return VirtualKey::kF8;
+    case XK_F9:
+      return VirtualKey::kF9;
+    case XK_F10:
+      return VirtualKey::kF10;
+    case XK_F11:
+      return VirtualKey::kF11;
+    case XK_F12:
+      return VirtualKey::kF12;
+    case XK_F13:
+      return VirtualKey::kF13;
+    case XK_F14:
+      return VirtualKey::kF14;
+    case XK_F15:
+      return VirtualKey::kF15;
+    case XK_F16:
+      return VirtualKey::kF16;
+    case XK_F17:
+      return VirtualKey::kF17;
+    case XK_F18:
+      return VirtualKey::kF18;
+    case XK_F19:
+      return VirtualKey::kF19;
+    case XK_F20:
+      return VirtualKey::kF20;
+    case XK_F21:
+      return VirtualKey::kF21;
+    case XK_F22:
+      return VirtualKey::kF22;
+    case XK_F23:
+      return VirtualKey::kF23;
+    case XK_F24:
+      return VirtualKey::kF24;
+
+    case XK_Num_Lock:
+      return VirtualKey::kNumLock;
+    case XK_Scroll_Lock:
+      return VirtualKey::kScrollLock;
+
+    case XF86XK_Back:
+      return VirtualKey::kBrowserBack;
+    case XF86XK_Forward:
+      return VirtualKey::kBrowserForward;
+    case XF86XK_Refresh:
+      return VirtualKey::kBrowserRefresh;
+    case XF86XK_Stop:
+      return VirtualKey::kBrowserStop;
+    case XF86XK_Search:
+      return VirtualKey::kBrowserSearch;
+    case XF86XK_Favorites:
+      return VirtualKey::kBrowserFavorites;
+    case XF86XK_HomePage:
+      return VirtualKey::kBrowserHome;
+
+    case XF86XK_AudioMute:
+      return VirtualKey::kVolumeMute;
+    case XF86XK_AudioLowerVolume:
+      return VirtualKey::kVolumeDown;
+    case XF86XK_AudioRaiseVolume:
+      return VirtualKey::kVolumeUp;
+    case XF86XK_AudioPrev:
+      return VirtualKey::kMediaNextTrack;
+    case XF86XK_AudioNext:
+      return VirtualKey::kMediaPrevTrack;
+    case XF86XK_AudioStop:
+      return VirtualKey::kMediaStop;
+    case XF86XK_AudioPause:
+      return VirtualKey::kMediaPlayPause;
+    case XF86XK_Mail:
+      return VirtualKey::kLaunchMail;
+    case XF86XK_AudioMedia:
+      return VirtualKey::kLaunchMediaSelect;
+    case XF86XK_Launch0:
+      return VirtualKey::kLaunchApp1;
+    case XF86XK_Launch1:
+      return VirtualKey::kLaunchApp2;
+
+    case XK_plus:
+      return VirtualKey::kOemPlus;
+    case XK_comma:
+      return VirtualKey::kOemComma;
+    case XK_minus:
+      return VirtualKey::kOemMinus;
+    case XK_period:
+      return VirtualKey::kOemPeriod;
+  }
+}
+
+void ParseXEventState(uint32_t state, MouseButton* out_pressed_button_mask,
+                      ModifierKey* out_modifier_key_mask) {
+  if (out_pressed_button_mask) {
+    MouseButton pressed_button_mask = MouseButton::kNone;
+    if (state & Button1Mask) {
+      pressed_button_mask |= MouseButton::kButton1;
+    }
+    if (state & Button2Mask) {
+      pressed_button_mask |= MouseButton::kButton2;
+    }
+    if (state & Button3Mask) {
+      pressed_button_mask |= MouseButton::kButton3;
+    }
+    *out_pressed_button_mask = pressed_button_mask;
+  }
+  if (out_modifier_key_mask) {
+    ModifierKey modifier_key_mask = ModifierKey::kNone;
+    if (state & ShiftMask) {
+      modifier_key_mask |= ModifierKey::kShift;
+    }
+    if (state & ControlMask) {
+      modifier_key_mask |= ModifierKey::kCtrl;
+    }
+    if (state & Mod1Mask) {
+      modifier_key_mask |= ModifierKey::kAlt;
+    }
+    *out_modifier_key_mask = modifier_key_mask;
+  }
+}
+
+}  // namespace
+
 ref_ptr<Control> Control::Create(ref_ptr<MessageLoop> message_loop) {
   return make_ref<X11Control>(message_loop, nullptr);
 }
@@ -33,6 +365,10 @@ X11Control::X11Control(ref_ptr<MessageLoop> message_loop,
     : Control(message_loop), container_(container) {
   create_event_ = Event::CreateManualResetEvent(false);
   destroy_event_ = Event::CreateManualResetEvent(false);
+
+  // Create shared display link and suspend until the control is created.
+  display_link_ = make_ref<TimerDisplayLink>(message_loop);
+  display_link_->Suspend();
 }
 
 X11Control::~X11Control() { DCHECK(!window_handle_); }
@@ -90,6 +426,11 @@ bool X11Control::is_suspended() {
 
 void X11Control::set_suspended(bool suspended) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (is_suspended_ && !suspended) {
+    display_link_->Resume();
+  } else if (!is_suspended_ && suspended) {
+    display_link_->Suspend();
+  }
   is_suspended_ = suspended;
   switch (state_) {
     case State::kCreating:
@@ -401,6 +742,10 @@ bool X11Control::BeginCreate() {
 }
 
 bool X11Control::EndCreate() {
+  if (!is_suspended_) {
+    display_link_->Resume();
+  }
+
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     state_ = State::kCreated;
@@ -463,6 +808,10 @@ ref_ptr<WaitHandle> X11Control::Destroy() {
 
 bool X11Control::BeginDestroy() {
   PostDestroying();
+
+  // Fully stop the display link.
+  display_link_->Suspend();
+  display_link_->Stop();
 
   // Note that we let the DestroyNotify message handle the OnClose().
   ::XDestroyWindow(display_handle(), window_handle());
@@ -589,36 +938,152 @@ X11Control::WindowState X11Control::QueryWindowState() {
 
 bool X11Control::OnXEvent(::XEvent* x_event) {
   switch (x_event->type) {
-    case KeyPress: {
-      // Emitted when a key is pressed while the control has focus.
-      // const auto& ev = x_event->xkey;
-      VLOG(2) << "KeyPress";
-      return true;
-    }
+    case KeyPress:
     case KeyRelease: {
-      // Emitted when a key is released while the control has focus.
-      // const auto& ev = x_event->xkey;
-      VLOG(2) << "KeyRelease";
+      // Emitted when a key is pressed or released while the control has focus.
+      const auto& ev = x_event->xkey;
+      KeySym key_sym = XLookupKeysym(&x_event->xkey, 0);
+      int key_code = static_cast<int>(key_sym);
+      VirtualKey virtual_key = MapVirtualKey(key_code);
+      ModifierKey modifier_key_mask = ModifierKey::kNone;
+      ParseXEventState(ev.state, nullptr, &modifier_key_mask);
+      bool is_down = x_event->type == KeyPress;
+      // X state is prior to the action, so fix it up.
+      switch (virtual_key) {
+        default:
+          break;
+        case VirtualKey::kControl:
+          if (is_down) {
+            modifier_key_mask |= ModifierKey::kCtrl;
+          } else {
+            modifier_key_mask &= ~ModifierKey::kCtrl;
+          }
+          break;
+        case VirtualKey::kShift:
+          if (is_down) {
+            modifier_key_mask |= ModifierKey::kShift;
+          } else {
+            modifier_key_mask &= ~ModifierKey::kShift;
+          }
+          break;
+        case VirtualKey::kAlt:
+          if (is_down) {
+            modifier_key_mask |= ModifierKey::kAlt;
+          } else {
+            modifier_key_mask &= ~ModifierKey::kAlt;
+          }
+          break;
+      }
+      PostInputEvent([this, key_code, virtual_key, modifier_key_mask, is_down](
+          InputListener* listener, ref_ptr<Control> control) {
+        KeyboardEvent keyboard_event{key_code, virtual_key, modifier_key_mask};
+        if (is_down) {
+          listener->OnKeyDown(control, keyboard_event);
+          virtual_key_state_[static_cast<int>(virtual_key)] = true;
+
+          // If this was not a special key route it as a keypress.
+          // TODO(benvanik): a better way to determine this for non-latin.
+          if ((key_code >= XK_A && key_code <= XK_Z) ||
+              (key_code >= XK_a && key_code <= XK_z) ||
+              (key_code >= XK_0 && key_code <= XK_9)) {
+            listener->OnKeyPress(control, keyboard_event);
+          }
+        } else {
+          virtual_key_state_[static_cast<int>(virtual_key)] = false;
+          listener->OnKeyUp(std::move(control), keyboard_event);
+        }
+      });
       return true;
     }
 
-    case ButtonPress: {
-      // Emitted when a mouse button is pressed.
-      // const auto& ev = x_event->xbutton;
-      VLOG(2) << "ButtonPress";
-      return true;
-    }
+    case ButtonPress:
     case ButtonRelease: {
-      // Emitted when a mouse button is released.
-      // const auto& ev = x_event->xbutton;
-      VLOG(2) << "ButtonRelease";
+      // Emitted when a mouse button is pressed or released.
+      const auto& ev = x_event->xbutton;
+      Point2D screen_px{ev.x_root, ev.y_root};
+      Point2D control_px{ev.x, ev.y};
+      int wheel_delta = 0;
+      bool is_wheel_event = false;
+      MouseButton action_button = MouseButton::kNone;
+      if (ev.button == 4 || ev.button == 5) {
+        // Mouse wheel events are button 4/5. Smh.
+        if (x_event->type != ButtonPress) {
+          // Only handle down.
+          return false;
+        }
+        switch (ev.button) {
+          case 4:
+            wheel_delta = 120;
+            is_wheel_event = true;
+            break;
+          case 5:
+            wheel_delta = -120;
+            is_wheel_event = true;
+            break;
+        }
+      } else {
+        // Normal button press.
+        switch (ev.button) {
+          case 1:
+            action_button = MouseButton::kButton1;
+            break;
+          case 2:
+            action_button = MouseButton::kButton2;
+            break;
+          case 3:
+            action_button = MouseButton::kButton3;
+            break;
+          default:
+            return false;
+        }
+      }
+      MouseButton pressed_button_mask = MouseButton::kNone;
+      ModifierKey modifier_key_mask = ModifierKey::kNone;
+      ParseXEventState(ev.state, &pressed_button_mask, &modifier_key_mask);
+      if (!is_wheel_event) {
+        // X state is prior to the action, so fix it up.
+        if (x_event->type == ButtonPress) {
+          pressed_button_mask |= action_button;
+        } else {
+          pressed_button_mask &= ~action_button;
+        }
+      }
+      MouseEvent mouse_event{screen_px,           control_px,
+                             wheel_delta,         action_button,
+                             pressed_button_mask, modifier_key_mask};
+      if (is_wheel_event) {
+        PostInputEvent(
+            [mouse_event](InputListener* listener, ref_ptr<Control> control) {
+              listener->OnMouseWheel(std::move(control), mouse_event);
+            });
+      } else if (x_event->type == ButtonPress) {
+        PostInputEvent(
+            [mouse_event](InputListener* listener, ref_ptr<Control> control) {
+              listener->OnMouseDown(std::move(control), mouse_event);
+            });
+      } else {
+        PostInputEvent(
+            [mouse_event](InputListener* listener, ref_ptr<Control> control) {
+              listener->OnMouseUp(std::move(control), mouse_event);
+            });
+      }
       return true;
     }
-
     case MotionNotify: {
       // Emitted on pointer motion.
       const auto& ev = x_event->xmotion;
-      VLOG(2) << "MotionNotify " << ev.x << "," << ev.y;
+      Point2D screen_px{ev.x_root, ev.y_root};
+      Point2D control_px{ev.x, ev.y};
+      MouseButton pressed_button_mask = MouseButton::kNone;
+      ModifierKey modifier_key_mask = ModifierKey::kNone;
+      ParseXEventState(ev.state, &pressed_button_mask, &modifier_key_mask);
+      MouseEvent mouse_event{
+          screen_px,          control_px,          0,
+          MouseButton::kNone, pressed_button_mask, modifier_key_mask};
+      PostInputEvent(
+          [mouse_event](InputListener* listener, ref_ptr<Control> control) {
+            listener->OnMouseMove(std::move(control), mouse_event);
+          });
       return true;
     }
 
@@ -630,8 +1095,21 @@ bool X11Control::OnXEvent(::XEvent* x_event) {
     }
     case LeaveNotify: {
       // Emitted when the mouse cursor leaves the control.
-      // const auto& ev = x_event->xcrossing;
       VLOG(1) << "LeaveNotify";
+      const auto& ev = x_event->xcrossing;
+      Point2D screen_px{ev.x_root, ev.y_root};
+      Point2D control_px{ev.x, ev.y};
+      MouseButton pressed_button_mask = MouseButton::kNone;
+      ModifierKey modifier_key_mask = ModifierKey::kNone;
+      ParseXEventState(ev.state, &pressed_button_mask, &modifier_key_mask);
+      MouseEvent mouse_event{
+          screen_px,          control_px,          0,
+          MouseButton::kNone, pressed_button_mask, modifier_key_mask};
+
+      PostInputEvent(
+          [mouse_event](InputListener* listener, ref_ptr<Control> control) {
+            listener->OnMouseOut(std::move(control), mouse_event);
+          });
       return true;
     }
 
@@ -657,6 +1135,17 @@ bool X11Control::OnXEvent(::XEvent* x_event) {
       if (state_ == State::kCreated) {
         PostFocusChanged(false);
       }
+      // Reset keyboard state.
+      PostInputEvent([this](InputListener* listener, ref_ptr<Control> control) {
+        for (size_t i = 0; i < count_of(virtual_key_state_); ++i) {
+          if (virtual_key_state_[i]) {
+            virtual_key_state_[i] = false;
+            KeyboardEvent keyboard_event{0, static_cast<VirtualKey>(i),
+                                         ModifierKey::kNone};
+            listener->OnKeyUp(control, keyboard_event);
+          }
+        }
+      });
       return true;
     }
 
@@ -807,9 +1296,15 @@ bool X11Control::OnXEvent(::XEvent* x_event) {
           case WindowState::kWithdrawn:
             break;
           case WindowState::kNormal:
+            if (is_suspended_) {
+              display_link_->Resume();
+            }
             is_suspended_ = false;
             break;
           case WindowState::kIconic:
+            if (!is_suspended_) {
+              display_link_->Suspend();
+            }
             is_suspended_ = true;
             is_focused_ = false;
             break;

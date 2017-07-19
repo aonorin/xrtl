@@ -25,6 +25,9 @@ typedef struct _MARGINS {
 
 #include <dwmapi.h>   // DWM MMCSS/etc.
 #include <tpcshrd.h>  // Tablet defines.
+#include <windowsx.h>
+
+#include <utility>
 
 #include "xrtl/base/logging.h"
 
@@ -111,6 +114,30 @@ void DisableMediaPresentation() {
   }
 }
 
+// Queries the refresh rate of the monitor the given window is mostly on.
+// Returns 0 if the rate could not be queried.
+int QueryRefreshRate(HWND hwnd) {
+  HMONITOR monitor = ::MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY);
+  if (!monitor) {
+    return 0;
+  }
+  ::MONITORINFOEX monitor_info;
+  monitor_info.cbSize = sizeof(monitor_info);
+  if (!::GetMonitorInfo(monitor, &monitor_info)) {
+    return 0;
+  }
+  DEVMODE dev_mode;
+  dev_mode.dmSize = sizeof(dev_mode);
+  if (!::EnumDisplaySettings(monitor_info.szDevice, ENUM_CURRENT_SETTINGS,
+                             &dev_mode)) {
+    return 0;
+  }
+  if (dev_mode.dmDisplayFrequency <= 1) {
+    return 0;
+  }
+  return static_cast<int>(dev_mode.dmDisplayFrequency);
+}
+
 }  // namespace
 
 ref_ptr<Control> Control::Create(ref_ptr<MessageLoop> message_loop) {
@@ -122,6 +149,10 @@ Win32Control::Win32Control(ref_ptr<MessageLoop> message_loop,
     : Control(message_loop), container_(container) {
   create_event_ = Event::CreateManualResetEvent(false);
   destroy_event_ = Event::CreateManualResetEvent(false);
+
+  // Create shared display link and suspend until the control is created.
+  display_link_ = make_ref<TimerDisplayLink>(message_loop);
+  display_link_->Suspend();
 }
 
 Win32Control::~Win32Control() { DCHECK(!hwnd_); }
@@ -144,6 +175,19 @@ Control::PlatformHandle Win32Control::platform_handle() {
   }
 }
 
+Control::PlatformHandle Win32Control::platform_display_handle() {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  switch (state_) {
+    default:
+    case State::kCreating:
+    case State::kDestroyed:
+      return 0;
+    case State::kCreated:
+    case State::kDestroying:
+      return reinterpret_cast<Control::PlatformHandle>(dc_);
+  }
+}
+
 Control::State Win32Control::state() {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   return state_;
@@ -161,6 +205,11 @@ bool Win32Control::is_suspended() {
 
 void Win32Control::set_suspended(bool suspended) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (is_suspended_ && !suspended) {
+    display_link_->Resume();
+  } else if (!is_suspended_ && suspended) {
+    display_link_->Suspend();
+  }
   is_suspended_ = suspended;
   switch (state_) {
     case State::kCreating:
@@ -355,6 +404,7 @@ bool Win32Control::BeginCreate() {
     LOG(ERROR) << "Unable to create window";
     return false;
   }
+  DCHECK(dc_ != nullptr);
   VLOG(1) << "Created Win32 window: " << std::hex << hwnd();
 
   // Disable flicks and other tablet gestures.
@@ -397,6 +447,10 @@ bool Win32Control::BeginCreate() {
 
 bool Win32Control::EndCreate() {
   DCHECK(hwnd_);
+
+  if (!is_suspended_) {
+    display_link_->Resume();
+  }
 
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -461,6 +515,10 @@ ref_ptr<WaitHandle> Win32Control::Destroy() {
 bool Win32Control::BeginDestroy() {
   PostDestroying();
 
+  // Fully stop the display link.
+  display_link_->Suspend();
+  display_link_->Stop();
+
   // We'll call EndDestroy from the close message handler.
   message_loop_->Defer(&pending_task_list_,
                        [this]() { ::DestroyWindow(hwnd()); });
@@ -474,6 +532,10 @@ bool Win32Control::EndDestroy() {
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     state_ = State::kDestroyed;
+    if (dc_) {
+      ::ReleaseDC(hwnd_, dc_);
+      dc_ = nullptr;
+    }
     if (hwnd_) {
       ::SetWindowLongPtr(hwnd(), GWLP_USERDATA, 0);
       hwnd_ = nullptr;
@@ -498,6 +560,13 @@ void Win32Control::Invalidate() {
     return;
   }
   ::InvalidateRect(hwnd(), nullptr, FALSE);
+}
+
+void Win32Control::CheckMonitorChanged() {
+  // Query the refresh rate of the monitor the control is on and update the
+  // display link.
+  int refresh_rate = QueryRefreshRate(hwnd_);
+  display_link_->set_max_frames_per_second(refresh_rate);
 }
 
 Rect2D Win32Control::QueryBounds() {
@@ -541,6 +610,7 @@ LRESULT CALLBACK Win32Control::WndProcThunk(HWND hwnd, UINT message,
     auto create_struct = reinterpret_cast<LPCREATESTRUCT>(l_param);
     control = reinterpret_cast<Win32Control*>(create_struct->lpCreateParams);
     control->hwnd_ = hwnd;
+    control->dc_ = ::GetDC(hwnd);
 
     // Attach our pointer in user data so that we can get it back in the
     // message thunk.
@@ -563,12 +633,14 @@ LRESULT Win32Control::WndProc(HWND hwnd, UINT message, WPARAM w_param,
   DCHECK_EQ(hwnd_, hwnd);
 
   if (message >= WM_MOUSEFIRST && message <= WM_MOUSELAST) {
-    // TODO(benvanik): mouse events.
-    VLOG(2) << "(mouse message)";
+    if (HandleMouseMessage(message, w_param, l_param)) {
+      return 0;  // Handled - don't perform default.
+    }
     return ::DefWindowProc(hwnd, message, w_param, l_param);
   } else if (message >= WM_KEYFIRST && message <= WM_KEYLAST) {
-    // TODO(benvanik): keyboard events.
-    VLOG(2) << "(keyboard message)";
+    if (HandleKeyboardMessage(message, w_param, l_param)) {
+      return 0;  // Handled - don't perform default.
+    }
     return ::DefWindowProc(hwnd, message, w_param, l_param);
   }
 
@@ -581,6 +653,7 @@ LRESULT Win32Control::WndProc(HWND hwnd, UINT message, WPARAM w_param,
 
     case WM_CREATE: {
       VLOG(1) << "WM_CREATE";
+      CheckMonitorChanged();
       break;
     }
     case WM_CLOSE: {
@@ -611,6 +684,7 @@ LRESULT Win32Control::WndProc(HWND hwnd, UINT message, WPARAM w_param,
         // Ignore when minimized.
         break;
       }
+      CheckMonitorChanged();
       std::lock_guard<std::recursive_mutex> lock(mutex_);
       bounds_ = bounds;
       PostResized(bounds_);
@@ -627,6 +701,7 @@ LRESULT Win32Control::WndProc(HWND hwnd, UINT message, WPARAM w_param,
         // Ignore when minimized.
         break;
       }
+      CheckMonitorChanged();
       std::lock_guard<std::recursive_mutex> lock(mutex_);
       bounds_ = QueryBounds();
       PostResized(bounds_);
@@ -645,6 +720,7 @@ LRESULT Win32Control::WndProc(HWND hwnd, UINT message, WPARAM w_param,
 
     case WM_DISPLAYCHANGE: {
       VLOG(1) << "WM_DISPLAYCHANGE";
+      CheckMonitorChanged();
       break;
     }
 
@@ -653,12 +729,17 @@ LRESULT Win32Control::WndProc(HWND hwnd, UINT message, WPARAM w_param,
       VLOG(1) << "WM_SHOWWINDOW " << is_visible;
       if (is_visible) {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
+        if (is_suspended_) {
+          display_link_->Resume();
+        }
         is_suspended_ = false;
         PostSuspendChanged(is_suspended_);
         bounds_ = QueryBounds();
         PostResized(bounds_);
+        OnFocusChanged(is_focused_);
         PostFocusChanged(is_focused_);
       }
+      CheckMonitorChanged();
       break;
     }
 
@@ -667,23 +748,32 @@ LRESULT Win32Control::WndProc(HWND hwnd, UINT message, WPARAM w_param,
         case SC_MINIMIZE: {
           VLOG(1) << "WM_SYSCOMMAND: SC_MINIMIZE";
           std::lock_guard<std::recursive_mutex> lock(mutex_);
+          if (!is_suspended_) {
+            display_link_->Suspend();
+          }
           is_suspended_ = true;
           PostSuspendChanged(is_suspended_);
           is_focused_ = false;
+          OnFocusChanged(is_focused_);
           PostFocusChanged(is_focused_);
           break;
         }
         case SC_RESTORE: {
           VLOG(1) << "WM_SYSCOMMAND: SC_RESTORE";
           std::lock_guard<std::recursive_mutex> lock(mutex_);
+          if (is_suspended_) {
+            display_link_->Resume();
+          }
           is_suspended_ = false;
           PostSuspendChanged(is_suspended_);
           bounds_ = QueryBounds();
           PostResized(bounds_);
+          OnFocusChanged(is_focused_);
           PostFocusChanged(is_focused_);
           break;
         }
       }
+      CheckMonitorChanged();
       break;
     }
 
@@ -696,6 +786,7 @@ LRESULT Win32Control::WndProc(HWND hwnd, UINT message, WPARAM w_param,
       std::lock_guard<std::recursive_mutex> lock(mutex_);
       is_focused_ = false;
       if (state_ == State::kCreated) {
+        OnFocusChanged(is_focused_);
         PostFocusChanged(is_focused_);
       }
       break;
@@ -705,6 +796,7 @@ LRESULT Win32Control::WndProc(HWND hwnd, UINT message, WPARAM w_param,
       std::lock_guard<std::recursive_mutex> lock(mutex_);
       is_focused_ = true;
       if (state_ == State::kCreated) {
+        OnFocusChanged(is_focused_);
         PostFocusChanged(is_focused_);
       }
       break;
@@ -712,6 +804,202 @@ LRESULT Win32Control::WndProc(HWND hwnd, UINT message, WPARAM w_param,
   }
 
   return ::DefWindowProc(hwnd, message, w_param, l_param);
+}
+
+bool Win32Control::HandleMouseMessage(UINT message, WPARAM w_param,
+                                      LPARAM l_param) {
+  // Most wheel events are already in client-space, except MOUSEWHEEL.
+  int x = GET_X_LPARAM(l_param);
+  int y = GET_Y_LPARAM(l_param);
+  Point2D control_px;
+  Point2D screen_px;
+  if (message == WM_MOUSEWHEEL) {
+    POINT pt = {x, y};
+    ::ScreenToClient(hwnd_, &pt);
+    screen_px = {x, y};
+    control_px = {pt.x, pt.y};
+  } else {
+    POINT pt = {x, y};
+    ::ClientToScreen(hwnd_, &pt);
+    screen_px = {pt.x, pt.y};
+    control_px = {x, y};
+  }
+
+  int wheel_delta = 0;
+  MouseButton action_button = MouseButton::kNone;
+  switch (message) {
+    case WM_LBUTTONDOWN:
+    case WM_LBUTTONUP:
+      action_button = MouseButton::kButton1;
+      break;
+    case WM_MBUTTONDOWN:
+    case WM_MBUTTONUP:
+      action_button = MouseButton::kButton2;
+      break;
+    case WM_RBUTTONDOWN:
+    case WM_RBUTTONUP:
+      action_button = MouseButton::kButton3;
+      break;
+    case WM_XBUTTONDOWN:
+    case WM_XBUTTONUP:
+      switch (GET_XBUTTON_WPARAM(w_param)) {
+        case XBUTTON1:
+          action_button = MouseButton::kButton4;
+          break;
+        case XBUTTON2:
+          action_button = MouseButton::kButton5;
+          break;
+        default:
+          return false;
+      }
+      break;
+    case WM_MOUSEWHEEL:
+      // No action button for mouse wheel.
+      wheel_delta = GET_WHEEL_DELTA_WPARAM(w_param);
+      break;
+    case WM_MOUSEMOVE:
+      // No action button for mouse move.
+      break;
+      break;
+    default:
+      // Unhandled mouse gesture (like double click/etc).
+      return true;
+  }
+
+  MouseButton pressed_button_mask = MouseButton::kNone;
+  ModifierKey modifier_key_mask = ModifierKey::kNone;
+  if (w_param & MK_LBUTTON) {
+    pressed_button_mask |= MouseButton::kButton1;
+  }
+  if (w_param & MK_MBUTTON) {
+    pressed_button_mask |= MouseButton::kButton2;
+  }
+  if (w_param & MK_RBUTTON) {
+    pressed_button_mask |= MouseButton::kButton3;
+  }
+  if (w_param & MK_XBUTTON1) {
+    pressed_button_mask |= MouseButton::kButton4;
+  }
+  if (w_param & MK_XBUTTON2) {
+    pressed_button_mask |= MouseButton::kButton5;
+  }
+  if (w_param & MK_CONTROL) {
+    modifier_key_mask |= ModifierKey::kCtrl;
+  }
+  if (w_param & MK_SHIFT) {
+    modifier_key_mask |= ModifierKey::kShift;
+  }
+
+  MouseEvent mouse_event{screen_px,     control_px,          wheel_delta,
+                         action_button, pressed_button_mask, modifier_key_mask};
+  switch (message) {
+    case WM_LBUTTONDOWN:
+    case WM_MBUTTONDOWN:
+    case WM_RBUTTONDOWN:
+    case WM_XBUTTONDOWN:
+      PostInputEvent(
+          [mouse_event](InputListener* listener, ref_ptr<Control> control) {
+            listener->OnMouseDown(std::move(control), mouse_event);
+          });
+      break;
+    case WM_LBUTTONUP:
+    case WM_MBUTTONUP:
+    case WM_RBUTTONUP:
+    case WM_XBUTTONUP:
+      PostInputEvent(
+          [mouse_event](InputListener* listener, ref_ptr<Control> control) {
+            listener->OnMouseUp(std::move(control), mouse_event);
+          });
+      break;
+    case WM_MOUSEWHEEL:
+      PostInputEvent(
+          [mouse_event](InputListener* listener, ref_ptr<Control> control) {
+            listener->OnMouseWheel(std::move(control), mouse_event);
+          });
+      break;
+    case WM_MOUSEMOVE:
+      PostInputEvent(
+          [mouse_event](InputListener* listener, ref_ptr<Control> control) {
+            listener->OnMouseMove(std::move(control), mouse_event);
+          });
+      break;
+  }
+
+  // Returning true will prevent default wndproc.
+  return true;
+}
+
+bool Win32Control::HandleKeyboardMessage(UINT message, WPARAM w_param,
+                                         LPARAM l_param) {
+  // TODO(benvanik): figure out if we can get >255 and how to handle that.
+  int key_code = static_cast<int>(w_param);
+  DCHECK_LE(key_code, 255);
+  if (key_code > 255) {
+    return false;
+  }
+
+  ModifierKey modifier_key_mask = ModifierKey::kNone;
+  if ((::GetAsyncKeyState(VK_CONTROL) & 0x8000) == 0x8000) {
+    modifier_key_mask |= ModifierKey::kCtrl;
+  }
+  if ((::GetAsyncKeyState(VK_SHIFT) & 0x8000) == 0x8000) {
+    modifier_key_mask |= ModifierKey::kShift;
+  }
+  if ((::GetAsyncKeyState(VK_MENU) & 0x8000) == 0x8000) {
+    modifier_key_mask |= ModifierKey::kAlt;
+  }
+
+  VirtualKey virtual_key = VirtualKey::kNone;
+  if (key_code <= 255) {
+    virtual_key = static_cast<VirtualKey>(key_code);
+  }
+  KeyboardEvent keyboard_event{key_code, virtual_key, modifier_key_mask};
+  switch (message) {
+    case WM_KEYDOWN:
+      if (!key_down_map_[key_code]) {
+        key_down_map_[key_code] = 1;
+        PostInputEvent([keyboard_event](InputListener* listener,
+                                        ref_ptr<Control> control) {
+          listener->OnKeyDown(std::move(control), keyboard_event);
+        });
+      }
+      break;
+    case WM_KEYUP:
+      if (key_down_map_[key_code]) {
+        key_down_map_[key_code] = 0;
+        PostInputEvent([keyboard_event](InputListener* listener,
+                                        ref_ptr<Control> control) {
+          listener->OnKeyUp(std::move(control), keyboard_event);
+        });
+      }
+      break;
+    case WM_CHAR:
+      PostInputEvent(
+          [keyboard_event](InputListener* listener, ref_ptr<Control> control) {
+            listener->OnKeyPress(std::move(control), keyboard_event);
+          });
+      break;
+  }
+
+  // Returning true will prevent default wndproc.
+  return true;
+}
+
+void Win32Control::OnFocusChanged(bool is_focused) {
+  for (int key_code = 0; key_code < count_of(key_down_map_); ++key_code) {
+    if (key_down_map_[key_code]) {
+      key_down_map_[key_code] = 0;
+      PostInputEvent([key_code](InputListener* listener,
+                                ref_ptr<Control> control) {
+        VirtualKey virtual_key = VirtualKey::kNone;
+        if (key_code <= 255) {
+          virtual_key = static_cast<VirtualKey>(key_code);
+        }
+        KeyboardEvent keyboard_event{key_code, virtual_key, ModifierKey::kNone};
+        listener->OnKeyUp(std::move(control), keyboard_event);
+      });
+    }
+  }
 }
 
 }  // namespace ui

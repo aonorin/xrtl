@@ -15,7 +15,10 @@
 #ifndef XRTL_GFX_ES3_ES3_IMAGE_H_
 #define XRTL_GFX_ES3_ES3_IMAGE_H_
 
+#include <functional>
+
 #include "xrtl/gfx/es3/es3_common.h"
+#include "xrtl/gfx/es3/es3_pixel_format.h"
 #include "xrtl/gfx/es3/es3_platform_context.h"
 #include "xrtl/gfx/image.h"
 
@@ -27,12 +30,17 @@ class ES3Image : public Image {
  public:
   static size_t ComputeAllocationSize(const Image::CreateParams& create_params);
 
-  ES3Image(ref_ptr<ES3PlatformContext> platform_context, GLenum internal_format,
+  ES3Image(ref_ptr<ES3PlatformContext> platform_context,
+           ref_ptr<MemoryHeap> memory_heap, ES3TextureParams texture_params,
            size_t allocation_size, CreateParams create_params);
   ~ES3Image() override;
 
+  ref_ptr<MemoryHeap> memory_heap() const override;
+
+  GLenum target() const { return target_; }
   GLuint texture_id() const { return texture_id_; }
 
+  ref_ptr<ImageView> CreateView() override;
   ref_ptr<ImageView> CreateView(Image::Type type, PixelFormat format,
                                 Image::LayerRange layer_range) override;
   ref_ptr<ImageView> CreateView(Image::Type type, PixelFormat format) override;
@@ -43,10 +51,14 @@ class ES3Image : public Image {
   bool WriteData(LayerRange target_range, const void* data,
                  size_t data_length) override;
 
+  void Release() override;
+
  private:
   ref_ptr<ES3PlatformContext> platform_context_;
+  ref_ptr<MemoryHeap> memory_heap_;
+  ES3TextureParams texture_params_;
+
   GLenum target_ = GL_TEXTURE_2D;
-  GLenum internal_format_ = GL_NONE;
   GLuint texture_id_ = 0;
 };
 

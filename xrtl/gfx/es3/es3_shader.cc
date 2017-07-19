@@ -16,6 +16,8 @@
 
 #include <spirv_glsl.hpp>
 
+#include <algorithm>
+#include <set>
 #include <utility>
 #include <vector>
 
@@ -26,14 +28,18 @@ namespace xrtl {
 namespace gfx {
 namespace es3 {
 
+namespace {
+using spirv_cross::SPIRType;
+}  // namespace
+
 ES3Shader::ES3Shader(ref_ptr<ES3PlatformContext> platform_context,
                      std::string entry_point)
-    : platform_context_(platform_context),
+    : platform_context_(std::move(platform_context)),
       entry_point_(std::move(entry_point)) {}
 
 ES3Shader::~ES3Shader() {
-  ES3PlatformContext::ThreadLock context_lock(
-      ES3PlatformContext::AcquireThreadContext(platform_context_));
+  auto context_lock =
+      ES3PlatformContext::LockTransientContext(platform_context_);
   if (shader_id_) {
     glDeleteShader(shader_id_);
   }
@@ -62,8 +68,8 @@ bool ES3Shader::CompileSource(GLenum shader_type,
 bool ES3Shader::CompileSource(GLenum shader_type,
                               ArrayView<StringView> sources) {
   WTF_SCOPE0("ES3Shader#CompileSource");
-  ES3PlatformContext::ThreadLock context_lock(
-      ES3PlatformContext::AcquireThreadContext(platform_context_));
+  auto context_lock =
+      ES3PlatformContext::LockTransientContext(platform_context_);
 
   shader_type_ = shader_type;
   shader_id_ = glCreateShader(shader_type_);
@@ -153,8 +159,8 @@ bool ES3Shader::CompileSpirVBinary(const uint32_t* data, size_t data_length) {
       return false;
   }
 
-  // Perform some fixup for GLSL ES 300.
-  // - remove layout location specifiers on varyings
+  // Remove layout location specifiers on varyings as they are matched by name
+  // in GL.
   auto shader_resources = compiler.get_shader_resources();
   if (shader_type != GL_VERTEX_SHADER) {
     // Remove location specifiers from shader inputs (except vertex shaders).
@@ -172,6 +178,99 @@ bool ES3Shader::CompileSpirVBinary(const uint32_t* data, size_t data_length) {
       }
     }
   }
+
+  // Record and then remove uniform binding sets/locations.
+  // We'll later assign the explicit bindings in ApplyBindings per-program.
+  auto ExtractUniformAssignment = [this, &compiler](
+      const spirv_cross::Resource& resource, bool is_block) {
+    int set = 0;
+    int binding = 0;
+    if (compiler.has_decoration(resource.id, spv::DecorationDescriptorSet)) {
+      set = compiler.get_decoration(resource.id, spv::DecorationDescriptorSet);
+      compiler.unset_decoration(resource.id, spv::DecorationDescriptorSet);
+    }
+    if (compiler.has_decoration(resource.id, spv::DecorationBinding)) {
+      binding = compiler.get_decoration(resource.id, spv::DecorationBinding);
+      compiler.unset_decoration(resource.id, spv::DecorationBinding);
+    }
+    uniform_assignments_.push_back({resource.name, is_block, set, binding});
+  };
+  for (const auto& resource : shader_resources.uniform_buffers) {
+    ExtractUniformAssignment(resource, true);
+  }
+  for (const auto& resource : shader_resources.storage_buffers) {
+    ExtractUniformAssignment(resource, false);
+  }
+  for (const auto& resource : shader_resources.storage_images) {
+    ExtractUniformAssignment(resource, false);
+  }
+  for (const auto& resource : shader_resources.sampled_images) {
+    ExtractUniformAssignment(resource, false);
+  }
+
+  // Record and reflect push constant buffers. We emulate push constants with
+  // normal nested GL struct uniform locations.
+  for (const auto& resource : shader_resources.push_constant_buffers) {
+    push_constant_block_name_ = resource.name;
+    const SPIRType& type = compiler.get_type(resource.base_type_id);
+    push_constant_members_.resize(type.member_types.size());
+    for (int i = 0; i < type.member_types.size(); ++i) {
+      PushConstantMember& member = push_constant_members_[i];
+      member.member_name = compiler.get_member_name(type.self, i);
+      // For now we only support primitives (float/vecN/matN/etc), and only
+      // sizes we know about.
+      const SPIRType& member_type = compiler.get_type(type.member_types[i]);
+      member.member_offset = compiler.type_struct_member_offset(type, i);
+      member.array_size = 1;  // TODO(benvanik): arrays.
+      member.transpose = compiler.get_decoration(member_type.self,
+                                                 spv::DecorationRowMajor) != 0;
+      switch (member_type.basetype) {
+        case SPIRType::Float:
+          DCHECK_EQ(member_type.width, 32);
+          if (member_type.columns > 1) {
+            // Matrix types.
+            static const GLenum kMatrixTypes[5][5] = {
+                {GL_NONE, GL_NONE, GL_NONE, GL_NONE},  // 0 unused
+                {GL_NONE, GL_NONE, GL_NONE, GL_NONE},  // 1 unused
+                {GL_NONE, GL_NONE, GL_FLOAT_MAT2, GL_FLOAT_MAT2x3,
+                 GL_FLOAT_MAT2x4},
+                {GL_NONE, GL_NONE, GL_FLOAT_MAT3x2, GL_FLOAT_MAT3,
+                 GL_FLOAT_MAT3x4},
+                {GL_NONE, GL_NONE, GL_FLOAT_MAT4x2, GL_FLOAT_MAT4x3,
+                 GL_FLOAT_MAT4},
+            };
+            DCHECK_LE(member_type.columns, 4);
+            DCHECK_LE(member_type.vecsize, 4);
+            member.member_type =
+                kMatrixTypes[member_type.columns][member_type.vecsize];
+          } else {
+            // Scalar/vector types.
+            static const GLenum kVectorTypes[5] = {
+                GL_NONE, GL_FLOAT, GL_FLOAT_VEC2, GL_FLOAT_VEC3, GL_FLOAT_VEC4};
+            DCHECK_LE(member_type.vecsize, 4);
+            member.member_type = kVectorTypes[member_type.vecsize];
+          }
+          break;
+        default:
+          // TODO(benvanik): richer type support.
+          LOG(ERROR) << "Unsupported push constant member type";
+          DCHECK(false);
+          return false;
+      }
+    }
+  }
+
+  // Sort uniform assignments to make binding reservation easier in ES3Program.
+  std::sort(uniform_assignments_.begin(), uniform_assignments_.end(),
+            [](const UniformAssignment& a, const UniformAssignment& b) {
+              if (a.set < b.set) {
+                return true;
+              } else if (a.set == b.set) {
+                return a.binding < b.binding;
+              } else {
+                return false;
+              }
+            });
 
   // Add common code and extension requirements.
   // TODO(benvanik): figure out what is required here.
@@ -193,6 +292,34 @@ bool ES3Shader::CompileSpirVBinary(const uint32_t* data, size_t data_length) {
 
   // Attempt to compile GLSL to a native GL shader.
   return CompileSource(shader_type, ArrayView<std::string>{translated_source});
+}
+
+bool ES3Shader::ApplyBindings(GLuint program_id,
+                              const SetBindingMaps& set_binding_maps) const {
+  for (const UniformAssignment& assignment : uniform_assignments_) {
+    GLuint gl_binding =
+        set_binding_maps.set_bindings[assignment.set][assignment.binding];
+    if (assignment.is_block) {
+      GLint block_index =
+          glGetUniformBlockIndex(program_id, assignment.uniform_name.c_str());
+      if (block_index != -1) {
+        glUniformBlockBinding(program_id, block_index, gl_binding);
+      }
+    } else {
+      GLint uniform_location =
+          glGetUniformLocation(program_id, assignment.uniform_name.c_str());
+      if (uniform_location != -1) {
+        glUniform1i(uniform_location, gl_binding);
+      }
+    }
+  }
+  return true;
+}
+
+GLint ES3Shader::QueryPushConstantLocation(
+    GLuint program_id, const PushConstantMember& member) const {
+  std::string full_name = push_constant_block_name_ + "." + member.member_name;
+  return glGetUniformLocation(program_id, full_name.c_str());
 }
 
 }  // namespace es3

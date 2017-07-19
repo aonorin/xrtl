@@ -16,6 +16,7 @@
 #define XRTL_PORT_WINDOWS_UI_WIN32_CONTROL_H_
 
 #include "xrtl/base/threading/event.h"
+#include "xrtl/port/common/ui/timer_display_link.h"
 #include "xrtl/port/windows/base/windows.h"
 #include "xrtl/ui/control.h"
 
@@ -37,7 +38,7 @@ class Win32Control : public Control {
 
   HWND hwnd() const;
   PlatformHandle platform_handle() override;
-  PlatformHandle platform_display_handle() override { return 0; }
+  PlatformHandle platform_display_handle() override;
 
   State state() override;
   bool is_active() override;
@@ -52,6 +53,8 @@ class Win32Control : public Control {
   bool is_cursor_visible() override;
   void set_cursor_visible(bool cursor_visible) override;
 
+  ref_ptr<DisplayLink> display_link() override { return display_link_; }
+
   ref_ptr<WaitHandle> Create() override;
   ref_ptr<WaitHandle> Destroy() override;
 
@@ -63,14 +66,20 @@ class Win32Control : public Control {
   bool BeginDestroy();
   bool EndDestroy();
 
+  void CheckMonitorChanged();
   Rect2D QueryBounds();
 
   static LRESULT CALLBACK WndProcThunk(HWND hwnd, UINT message, WPARAM w_param,
                                        LPARAM l_param);
   LRESULT WndProc(HWND hwnd, UINT message, WPARAM w_param, LPARAM l_param);
+  bool HandleMouseMessage(UINT message, WPARAM w_param, LPARAM l_param);
+  bool HandleKeyboardMessage(UINT message, WPARAM w_param, LPARAM l_param);
+
+  void OnFocusChanged(bool is_focused);
 
   ControlContainer* container_ = nullptr;
 
+  HDC dc_ = nullptr;
   HWND hwnd_ = nullptr;
 
   ref_ptr<Event> create_event_;
@@ -83,6 +92,11 @@ class Win32Control : public Control {
   Rect2D bounds_{{0, 0}, {128, 128}};
   gfx::rgba8_t background_color_;
   bool is_cursor_visible_ = true;
+
+  // TODO(benvanik): switch to bitmap.
+  uint8_t key_down_map_[256] = {0};
+
+  ref_ptr<TimerDisplayLink> display_link_;
 };
 
 }  // namespace ui

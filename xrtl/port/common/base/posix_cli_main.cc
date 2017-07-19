@@ -12,14 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "xrtl/gfx/es3/es3_resource_set.h"
+#include "xrtl/base/cli_main.h"
 
 namespace xrtl {
-namespace gfx {
-namespace es3 {
 
-//
+extern "C" int main(int argc, char** argv) { return CliMain(argc, argv); }
 
-}  // namespace es3
-}  // namespace gfx
 }  // namespace xrtl

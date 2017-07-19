@@ -19,19 +19,20 @@
 #include "xrtl/gfx/es3/es3_command_fence.h"
 #include "xrtl/gfx/es3/es3_framebuffer.h"
 #include "xrtl/gfx/es3/es3_image_view.h"
-#include "xrtl/gfx/es3/es3_memory_pool.h"
+#include "xrtl/gfx/es3/es3_memory_heap.h"
 #include "xrtl/gfx/es3/es3_pipeline.h"
 #include "xrtl/gfx/es3/es3_pipeline_layout.h"
 #include "xrtl/gfx/es3/es3_program.h"
+#include "xrtl/gfx/es3/es3_queue.h"
 #include "xrtl/gfx/es3/es3_queue_fence.h"
 #include "xrtl/gfx/es3/es3_render_pass.h"
 #include "xrtl/gfx/es3/es3_resource_set.h"
+#include "xrtl/gfx/es3/es3_resource_set_layout.h"
 #include "xrtl/gfx/es3/es3_sampler.h"
 #include "xrtl/gfx/es3/es3_shader.h"
 #include "xrtl/gfx/es3/es3_shader_module.h"
 #include "xrtl/gfx/es3/es3_swap_chain.h"
 #include "xrtl/gfx/util/memory_command_buffer.h"
-#include "xrtl/gfx/util/memory_command_decoder.h"
 
 namespace xrtl {
 namespace gfx {
@@ -41,28 +42,20 @@ ES3Context::ES3Context(ref_ptr<ContextFactory> context_factory,
                        std::vector<ref_ptr<Device>> devices,
                        Device::Features features,
                        ref_ptr<ES3PlatformContext> platform_context)
-    : Context(std::move(devices), std::move(features)),
-      context_factory_(context_factory),
+    : Context(std::move(devices), features),
+      context_factory_(std::move(context_factory)),
       platform_context_(std::move(platform_context)) {
-  // Spawn the thread that will execute command buffers.
-  queue_work_pending_event_ = Event::CreateAutoResetEvent(false);
-  queue_work_completed_event_ = Event::CreateAutoResetEvent(false);
-  Thread::CreateParams create_params;
-  create_params.name = "ES3ContextQueueThread";
-  queue_thread_ =
-      Thread::Create(std::move(create_params), QueueThreadMain, this);
+  // Setup the work queues.
+  primary_queue_ = make_unique<ES3Queue>(ES3Queue::Type::kCommandSubmission,
+                                         platform_context_);
+  presentation_queue_ =
+      make_unique<ES3Queue>(ES3Queue::Type::kPresentation, platform_context_);
 }
 
 ES3Context::~ES3Context() {
-  // Join with queue thread.
-  if (queue_thread_) {
-    {
-      std::lock_guard<std::mutex> lock(queue_mutex_);
-      queue_running_ = false;
-    }
-    queue_work_pending_event_->Set();
-    queue_thread_->Join();
-  }
+  // Join with queue threads.
+  presentation_queue_.reset();
+  primary_queue_.reset();
 }
 
 bool ES3Context::DeserializePipelineCache(const void* existing_data,
@@ -77,7 +70,7 @@ std::vector<uint8_t> ES3Context::SerializePipelineCache() {
 }
 
 ref_ptr<QueueFence> ES3Context::CreateQueueFence() {
-  return make_ref<ES3QueueFence>();
+  return make_ref<ES3QueueFence>(platform_context_);
 }
 
 ref_ptr<CommandFence> ES3Context::CreateCommandFence() {
@@ -99,9 +92,10 @@ ref_ptr<ShaderModule> ES3Context::CreateShaderModule(
 }
 
 ref_ptr<PipelineLayout> ES3Context::CreatePipelineLayout(
-    ArrayView<PipelineBinding> bindings,
-    ArrayView<PushConstantRange> push_constant_ranges) {
-  return make_ref<ES3PipelineLayout>(bindings, push_constant_ranges);
+    ArrayView<ref_ptr<ResourceSetLayout>> resource_set_layouts,
+    ArrayView<PipelineLayout::PushConstantRange> push_constant_ranges) {
+  return make_ref<ES3PipelineLayout>(resource_set_layouts,
+                                     push_constant_ranges);
 }
 
 ref_ptr<ComputePipeline> ES3Context::CreateComputePipeline(
@@ -205,10 +199,15 @@ ref_ptr<RenderPipeline> ES3Context::CreateRenderPipeline(
                                      shader_stages, program);
 }
 
+ref_ptr<ResourceSetLayout> ES3Context::CreateResourceSetLayout(
+    ArrayView<ResourceSetLayout::BindingSlot> binding_slots) {
+  return make_ref<ES3ResourceSetLayout>(binding_slots);
+}
+
 ref_ptr<ResourceSet> ES3Context::CreateResourceSet(
-    ref_ptr<PipelineLayout> pipeline_layout,
-    ArrayView<ResourceSet::Binding> bindings) {
-  return make_ref<ES3ResourceSet>(pipeline_layout, bindings);
+    ref_ptr<ResourceSetLayout> resource_set_layout,
+    ArrayView<ResourceSet::BindingValue> binding_values) {
+  return make_ref<ES3ResourceSet>(resource_set_layout, binding_values);
 }
 
 ref_ptr<SwapChain> ES3Context::CreateSwapChain(
@@ -216,22 +215,23 @@ ref_ptr<SwapChain> ES3Context::CreateSwapChain(
     int image_count, ArrayView<PixelFormat> pixel_formats) {
   // Shared memory pool for all frame buffer images.
   // TODO(benvanik): pool across swap chains.
-  auto memory_pool = CreateMemoryPool(MemoryType::kDeviceLocal, 0);
-  DCHECK(memory_pool);
+  auto memory_heap =
+      CreateMemoryHeap(MemoryType::kDeviceLocal, 64 * 1024 * 1024);
+  DCHECK(memory_heap);
 
-  return ES3SwapChain::Create(platform_context_, std::move(memory_pool),
-                              std::move(control), present_mode, image_count,
-                              pixel_formats);
+  return ES3SwapChain::Create(platform_context_, presentation_queue_.get(),
+                              std::move(memory_heap), std::move(control),
+                              present_mode, image_count, pixel_formats);
 }
 
-ref_ptr<MemoryPool> ES3Context::CreateMemoryPool(MemoryType memory_type_mask,
-                                                 size_t chunk_size) {
-  return make_ref<ES3MemoryPool>(platform_context_, memory_type_mask,
-                                 chunk_size);
+ref_ptr<MemoryHeap> ES3Context::CreateMemoryHeap(MemoryType memory_type_mask,
+                                                 size_t heap_size) {
+  return make_ref<ES3MemoryHeap>(platform_context_, memory_type_mask,
+                                 heap_size);
 }
 
 ref_ptr<Sampler> ES3Context::CreateSampler(Sampler::Params params) {
-  return make_ref<ES3Sampler>(params);
+  return make_ref<ES3Sampler>(platform_context_, params);
 }
 
 ref_ptr<RenderPass> ES3Context::CreateRenderPass(
@@ -257,129 +257,28 @@ Context::SubmitResult ES3Context::Submit(
     ArrayView<ref_ptr<CommandBuffer>> command_buffers,
     ArrayView<ref_ptr<QueueFence>> signal_queue_fences,
     ref_ptr<Event> signal_handle) {
-  {
-    std::lock_guard<std::mutex> lock(queue_mutex_);
-    DCHECK(queue_running_);
-    queue_.emplace(wait_queue_fences, command_buffers, signal_queue_fences,
-                   signal_handle);
-    queue_work_pending_event_->Set();
-  }
-
+  primary_queue_->EnqueueCommandBuffers(wait_queue_fences, command_buffers,
+                                        signal_queue_fences,
+                                        std::move(signal_handle));
   return SubmitResult::kSuccess;
 }
 
 Context::WaitResult ES3Context::WaitUntilQueuesIdle() {
-  while (true) {
-    std::lock_guard<std::mutex> lock(queue_mutex_);
-    if (!queue_running_ || queue_.empty()) {
-      return WaitResult::kSuccess;
-    }
-    Thread::Wait(queue_work_completed_event_);
-  }
-  return WaitResult::kSuccess;
+  return WaitUntilQueuesIdle(OperationQueueMask::kAll);
 }
 
 Context::WaitResult ES3Context::WaitUntilQueuesIdle(
     OperationQueueMask queue_mask) {
-  // We only have one queue so no need to mask.
-  return WaitUntilQueuesIdle();
-}
-
-void ES3Context::QueueThreadMain(void* param) {
-  reinterpret_cast<ES3Context*>(param)->RunQueue();
-}
-
-void ES3Context::RunQueue() {
-  // Acquire and lock the GL context we'll use to execute commands. It's only
-  // ever used by this thread so it's safe to keep active forever.
-  ES3PlatformContext::ThreadLock context_lock(
-      ES3PlatformContext::AcquireThreadContext(platform_context_));
-  if (!context_lock.is_held()) {
-    LOG(FATAL) << "Unable to make current the queue platform context";
+  bool any_failed = false;
+  if (any(queue_mask &
+          (OperationQueueMask::kRender | OperationQueueMask::kCompute |
+           OperationQueueMask::kTransfer))) {
+    any_failed = !primary_queue_->WaitUntilIdle() || any_failed;
   }
-
-  // Create the native command buffer that takes a recorded memory command
-  // buffer and makes GL calls.
-  auto queue_command_buffer = make_ref<ES3CommandBuffer>();
-
-  while (true) {
-    QueueEntry queue_entry;
-    {
-      std::lock_guard<std::mutex> lock(queue_mutex_);
-      if (!queue_running_) {
-        // Queue is shutting down; exit thread.
-        break;
-      }
-
-      // Attempt to dequeue a command buffer set.
-      if (!queue_.empty()) {
-        queue_entry = std::move(queue_.front());
-        queue_.pop();
-      } else {
-        // Signal that there was no work available.
-        queue_work_completed_event_->Set();
-      }
-    }
-
-    // If there was no work pending wait for more work.
-    if (queue_entry.command_buffers.empty()) {
-      Thread::Wait(queue_work_pending_event_);
-      continue;
-    }
-
-    // Wait on queue fences.
-    std::vector<ref_ptr<WaitHandle>> wait_events;
-    wait_events.reserve(queue_entry.wait_queue_fences.size());
-    for (const auto& queue_fence : queue_entry.wait_queue_fences) {
-      wait_events.push_back(queue_fence.As<ES3QueueFence>()->event());
-    }
-    if (Thread::WaitAll(wait_events) != Thread::WaitResult::kSuccess) {
-      break;
-    }
-
-    // Execute command buffers.
-    for (const auto& command_buffer : queue_entry.command_buffers) {
-      // Reset GL state.
-      queue_command_buffer->PrepareState();
-
-      // Get the underlying memory command buffer stream.
-      auto memory_command_buffer =
-          command_buffer.As<util::MemoryCommandBuffer>();
-      auto command_reader = memory_command_buffer->GetReader();
-
-      // Execute the command buffer against our native GL implementation.
-      util::MemoryCommandDecoder::Decode(&command_reader,
-                                         queue_command_buffer.get());
-
-      // Reset our execution command buffer to clear all state.
-      // This ensures that the next time we start using it the state is clean
-      // (as expected by command buffers).
-      queue_command_buffer->Reset();
-
-      // Reset the command buffer now that we have executed it. This should
-      // release any resources kept alive exclusively by the command buffer.
-      memory_command_buffer->Reset();
-    }
-
-    // TODO(benvanik): avoid? need to flush to ensure presents on other threads
-    //                 see the outputs, probably.
-    glFlush();
-
-    // Signal queue fences.
-    for (const auto& queue_fence : queue_entry.signal_queue_fences) {
-      queue_fence.As<ES3QueueFence>()->event()->Set();
-    }
-
-    // Signal CPU event.
-    if (queue_entry.signal_handle) {
-      queue_entry.signal_handle->Set();
-    }
+  if (any(queue_mask & OperationQueueMask::kPresent)) {
+    any_failed = !presentation_queue_->WaitUntilIdle() || any_failed;
   }
-
-  queue_work_completed_event_->Set();
-  queue_command_buffer.reset();
-  context_lock.reset();
-  ES3PlatformContext::ReleaseThreadContext();
+  return any_failed ? WaitResult::kDeviceLost : WaitResult::kSuccess;
 }
 
 }  // namespace es3

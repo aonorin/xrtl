@@ -16,6 +16,7 @@
 #define XRTL_GFX_ES3_ES3_PROGRAM_H_
 
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "xrtl/base/array_view.h"
@@ -40,6 +41,20 @@ class ES3Program : public RefObject<ES3Program> {
   // during linking.
   const std::string& info_log() const { return info_log_; }
 
+  // Returns a mapping of binding slot binding index to GL binding index.
+  const std::vector<GLuint>& set_binding_map(int set_index) const {
+    return set_binding_maps_.set_bindings[set_index];
+  }
+
+  using PushConstantMemberPair =
+      std::pair<const ES3Shader::PushConstantMember*, GLuint>;
+
+  // Returns a list of all used push constant members across all shaders paired
+  // with the GL uniform location of the member.
+  const std::vector<PushConstantMemberPair>& push_constant_members() const {
+    return push_constant_members_;
+  }
+
   // Attempts to link the shaders into a program.
   // Returns false if the link failed. info_log can be used to get the
   // detailed error logs.
@@ -51,6 +66,9 @@ class ES3Program : public RefObject<ES3Program> {
   GLuint program_id_ = 0;
 
   std::string info_log_;
+
+  ES3Shader::SetBindingMaps set_binding_maps_;
+  std::vector<PushConstantMemberPair> push_constant_members_;
 };
 
 }  // namespace es3

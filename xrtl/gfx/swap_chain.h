@@ -57,7 +57,7 @@ namespace gfx {
 //  DoRendering(command_buffer, framebuffer);
 //  // Submit for rendering into the framebuffer.
 //  context_->Submit(image_ready_fence, command_buffer, rendered_fence);
-//  // NOTE: command buffer is submitted here by the swap chain!
+//  // Asynchronously present the image.
 //  swap_chain->PresentImage(std::move(rendered_fence),
 //                           std::move(image_view));
 class SwapChain : public RefObject<SwapChain> {
@@ -69,12 +69,6 @@ class SwapChain : public RefObject<SwapChain> {
   // See section 20 here for more information:
   // https://software.intel.com/en-us/articles/api-without-secrets-introduction-to-vulkan-part-2#_Toc445674479
   enum class PresentMode {
-    // Queue up to 1 pending image at a time.
-    // This prevents tearing but may introduce frame skips (if the compositor
-    // runs slower than images are enqueued).
-    //
-    // Maps to VK_PRESENT_MODE_MAILBOX_KHR.
-    kLowLatency,
     // Immediately present the swap chain contents.
     // This may cause tearing as the image being used to scan-out the
     // display may be replaced with a newly-enqueued images. This is the
@@ -82,6 +76,12 @@ class SwapChain : public RefObject<SwapChain> {
     //
     // Maps to VK_PRESENT_MODE_IMMEDIATE_KHR.
     kImmediate,
+    // Queue up to 1 pending image at a time.
+    // This prevents tearing but may introduce frame skips (if the compositor
+    // runs slower than images are enqueued).
+    //
+    // Maps to VK_PRESENT_MODE_MAILBOX_KHR.
+    kLowLatency,
     // Queues the frame buffers for FIFO processing.
     // This is like the classic GL present mode in that the compositor ensures
     // all images queued are displayed even if it is running slower than
@@ -139,6 +139,8 @@ class SwapChain : public RefObject<SwapChain> {
     // The specified timeout elapsed while waiting for an image to become
     // available.
     kTimeout,
+    // A swap chain discard is pending and the image could not be acquired.
+    kDiscardPending,
     // The device was lost before or during the wait to dequeue an image.
     kDeviceLost,
   };
@@ -170,6 +172,8 @@ class SwapChain : public RefObject<SwapChain> {
     // The target swap chain surface has been resized and the swap chain no
     // longer matches. Resize the swap chain before continuing to render.
     kResizeRequired,
+    // A swap chain discard is pending and the image was not presented.
+    kDiscardPending,
     // The device was lost before or during the enqueue operation.
     kDeviceLost,
   };
@@ -189,6 +193,9 @@ class SwapChain : public RefObject<SwapChain> {
   // If an absolute present time is specified (as SystemClock::now_utc_millis())
   // the compositor may wait to display it on the screen until that time. Not
   // all implementations support this so it should only be treated as a hint.
+  //
+  // Calls to this function will never block. If the caller requires that the
+  // image be presented they must use Context::WaitUntilQueuesIdle.
   virtual PresentResult PresentImage(
       ref_ptr<QueueFence> wait_queue_fence, ref_ptr<ImageView> image_view,
       std::chrono::milliseconds present_time_utc_millis) = 0;
@@ -197,6 +204,15 @@ class SwapChain : public RefObject<SwapChain> {
     return PresentImage(std::move(wait_queue_fence), std::move(image_view),
                         std::chrono::milliseconds::min());
   }
+
+  // Requests that all pending presents are discarded.
+  // This can be used when the swap chain content is no longer useful, such as
+  // when the application is being backgrounded.
+  //
+  // This will block if a present is in progress and after this method returns
+  // no presents will occur unless more are queued. Note that all pending
+  // acquire fences will be signaled but attempts to present them will fail.
+  virtual void DiscardPendingPresents() = 0;
 
  protected:
   SwapChain(PresentMode present_mode, int image_count)
@@ -207,6 +223,13 @@ class SwapChain : public RefObject<SwapChain> {
   PixelFormat pixel_format_;
   Size2D size_{0, 0};
 };
+
+std::ostream& operator<<(std::ostream& stream,
+                         const SwapChain::ResizeResult& value);
+std::ostream& operator<<(std::ostream& stream,
+                         const SwapChain::AcquireResult& value);
+std::ostream& operator<<(std::ostream& stream,
+                         const SwapChain::PresentResult& value);
 
 }  // namespace gfx
 }  // namespace xrtl

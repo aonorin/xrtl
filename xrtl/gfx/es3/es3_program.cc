@@ -14,6 +14,8 @@
 
 #include "xrtl/gfx/es3/es3_program.h"
 
+#include <utility>
+
 #include "xrtl/base/tracing.h"
 
 namespace xrtl {
@@ -22,10 +24,10 @@ namespace es3 {
 
 ES3Program::ES3Program(ref_ptr<ES3PlatformContext> platform_context,
                        ArrayView<ref_ptr<ES3Shader>> shaders)
-    : platform_context_(platform_context),
+    : platform_context_(std::move(platform_context)),
       shaders_(std::vector<ref_ptr<ES3Shader>>(shaders)) {
-  ES3PlatformContext::ThreadLock context_lock(
-      ES3PlatformContext::AcquireThreadContext(platform_context_));
+  auto context_lock =
+      ES3PlatformContext::LockTransientContext(platform_context_);
 
   program_id_ = glCreateProgram();
 
@@ -35,8 +37,8 @@ ES3Program::ES3Program(ref_ptr<ES3PlatformContext> platform_context,
 }
 
 ES3Program::~ES3Program() {
-  ES3PlatformContext::ThreadLock context_lock(
-      ES3PlatformContext::AcquireThreadContext(platform_context_));
+  auto context_lock =
+      ES3PlatformContext::LockTransientContext(platform_context_);
   if (program_id_) {
     glDeleteProgram(program_id_);
   }
@@ -44,14 +46,18 @@ ES3Program::~ES3Program() {
 
 bool ES3Program::Link() {
   WTF_SCOPE0("ES3Program#Link");
-  ES3PlatformContext::ThreadLock context_lock(
-      ES3PlatformContext::AcquireThreadContext(platform_context_));
+  auto context_lock =
+      ES3PlatformContext::LockTransientContext(platform_context_);
 
   glLinkProgram(program_id_);
 
   // TODO(benvanik): validate?
 
   // TODO(benvanik): glUseProgram to force first usage and *really* link?
+  //                 Some implementations won't link until first use (even if
+  //                 you call glLinkProgram and query the status). Maybe that's
+  //                 been fixed, though, so waiting to see if we need to be
+  //                 paranoid.
 
   GLint link_status = 0;
   glGetProgramiv(program_id_, GL_LINK_STATUS, &link_status);
@@ -65,8 +71,49 @@ bool ES3Program::Link() {
   // TODO(benvanik): dump combined shader source.
   if (link_status != GL_TRUE) {
     LOG(ERROR) << "Program linking failed: " << info_log_;
-  } else if (info_log_.size() > 4) {
+    return false;
+  }
+  if (info_log_.size() > 4) {
     VLOG(1) << "Program linking warnings: " << info_log_;
+  }
+
+  // Perform binding allocation across the shaders.
+  GLuint next_binding_index = 0;
+  for (auto& shader : shaders_) {
+    // Assignments must be sorted by set+binding.
+    for (const auto& assignment : shader->uniform_assignments()) {
+      auto& set_bindings = set_binding_maps_.set_bindings[assignment.set];
+      if (set_bindings.size() <= assignment.binding) {
+        set_bindings.resize(static_cast<size_t>(assignment.binding) + 1);
+        set_bindings[assignment.binding] = next_binding_index++;
+      }
+    }
+  }
+
+  // Initialize shader bindings.
+  glUseProgram(program_id_);
+  for (const auto& shader : shaders_) {
+    if (!shader->ApplyBindings(program_id_, set_binding_maps_)) {
+      LOG(ERROR) << "Failed to apply shader uniform bindings";
+      return false;
+    }
+  }
+  glUseProgram(0);
+
+  // Merge shader push constant locations (as they should be shared, though
+  // the set of valid members may differ for each).
+  uint64_t location_set = 0;
+  for (const auto& shader : shaders_) {
+    for (const auto& member : shader->push_constant_members()) {
+      GLint uniform_location =
+          shader->QueryPushConstantLocation(program_id_, member);
+      if (uniform_location != -1) {
+        if ((location_set & (1 << uniform_location)) == 0) {
+          location_set |= (1 << uniform_location);
+          push_constant_members_.push_back({&member, uniform_location});
+        }
+      }
+    }
   }
 
   return link_status == GL_TRUE;

@@ -13,6 +13,7 @@ cc_library(
         ":es3_common",
         ":es3_platform_context",
         "//xrtl/gfx:buffer",
+        "//xrtl/gfx:memory_heap",
     ],
 )
 
@@ -36,6 +37,7 @@ cc_library(
         ":es3_common",
         ":es3_image",
         ":es3_pipeline",
+        ":es3_sampler",
         "//xrtl/gfx:command_encoder",
         "//xrtl/gfx:framebuffer",
     ],
@@ -43,7 +45,6 @@ cc_library(
 
 cc_library(
     name = "es3_command_fence",
-    srcs = ["es3_command_fence.cc"],
     hdrs = ["es3_command_fence.h"],
     deps = [
         ":es3_common",
@@ -70,7 +71,7 @@ cc_library(
         ":es3_common",
         ":es3_framebuffer",
         ":es3_image_view",
-        ":es3_memory_pool",
+        ":es3_memory_heap",
         ":es3_pipeline",
         ":es3_pipeline_layout",
         ":es3_platform_context",
@@ -78,6 +79,7 @@ cc_library(
         ":es3_queue_fence",
         ":es3_render_pass",
         ":es3_resource_set",
+        ":es3_resource_set_layout",
         ":es3_sampler",
         ":es3_shader",
         ":es3_shader_module",
@@ -145,14 +147,15 @@ cc_library(
     deps = [
         ":es3_common",
         ":es3_image_view",
+        ":es3_pixel_format",
         ":es3_platform_context",
         "//xrtl/gfx:image",
+        "//xrtl/gfx:memory_heap",
     ],
 )
 
 cc_library(
     name = "es3_image_view",
-    srcs = ["es3_image_view.cc"],
     hdrs = ["es3_image_view.h"],
     deps = [
         ":es3_common",
@@ -161,17 +164,18 @@ cc_library(
 )
 
 cc_library(
-    name = "es3_memory_pool",
-    srcs = ["es3_memory_pool.cc"],
-    hdrs = ["es3_memory_pool.h"],
+    name = "es3_memory_heap",
+    srcs = ["es3_memory_heap.cc"],
+    hdrs = ["es3_memory_heap.h"],
     deps = [
         ":es3_buffer",
         ":es3_common",
         ":es3_image",
         ":es3_pixel_format",
         ":es3_platform_context",
+        "//xrtl/base:math",
         "//xrtl/base:tracing",
-        "//xrtl/gfx:memory_pool",
+        "//xrtl/gfx:memory_heap",
     ],
 )
 
@@ -189,7 +193,6 @@ cc_library(
 
 cc_library(
     name = "es3_pipeline_layout",
-    srcs = ["es3_pipeline_layout.cc"],
     hdrs = ["es3_pipeline_layout.h"],
     deps = [
         ":es3_common",
@@ -218,7 +221,9 @@ cc_library(
             "//xrtl/port/common/gfx/es3:egl_platform_context",
         ],
         "//xrtl/tools/target_platform:macos": [],
-        "//xrtl/tools/target_platform:windows": [],
+        "//xrtl/tools/target_platform:windows": [
+            "//xrtl/port/windows/gfx/es3:wgl_platform_context",
+        ],
     }),
 )
 
@@ -228,6 +233,8 @@ cc_library(
     hdrs = ["es3_platform_context.h"],
     deps = [
         ":es3_common",
+        "//xrtl/base:flags",
+        "//xrtl/base:geometry",
         "//xrtl/base:ref_ptr",
         "//xrtl/base/threading:thread",
     ] + select({
@@ -248,6 +255,7 @@ cc_library(
     visibility = ["//xrtl/port:ports_only"],
     deps = [
         ":es3_common",
+        "//xrtl/base:geometry",
         "//xrtl/base:ref_ptr",
     ],
 )
@@ -266,19 +274,38 @@ cc_library(
 )
 
 cc_library(
+    name = "es3_queue",
+    srcs = ["es3_queue.cc"],
+    hdrs = ["es3_queue.h"],
+    deps = [
+        ":es3_command_buffer",
+        ":es3_common",
+        ":es3_platform_context",
+        ":es3_queue_fence",
+        "//xrtl/base:array_view",
+        "//xrtl/base:tracing",
+        "//xrtl/base/threading:event",
+        "//xrtl/base/threading:thread",
+        "//xrtl/gfx/util:memory_command_buffer",
+        "//xrtl/gfx/util:memory_command_decoder",
+    ],
+)
+
+cc_library(
     name = "es3_queue_fence",
     srcs = ["es3_queue_fence.cc"],
     hdrs = ["es3_queue_fence.h"],
     deps = [
         ":es3_common",
+        ":es3_platform_context",
         "//xrtl/base/threading:event",
+        "//xrtl/base/threading:thread",
         "//xrtl/gfx:queue_fence",
     ],
 )
 
 cc_library(
     name = "es3_render_pass",
-    srcs = ["es3_render_pass.cc"],
     hdrs = ["es3_render_pass.h"],
     deps = [
         ":es3_common",
@@ -288,11 +315,19 @@ cc_library(
 
 cc_library(
     name = "es3_resource_set",
-    srcs = ["es3_resource_set.cc"],
     hdrs = ["es3_resource_set.h"],
     deps = [
         ":es3_common",
         "//xrtl/gfx:resource_set",
+    ],
+)
+
+cc_library(
+    name = "es3_resource_set_layout",
+    hdrs = ["es3_resource_set_layout.h"],
+    deps = [
+        ":es3_common",
+        "//xrtl/gfx:resource_set_layout",
     ],
 )
 
@@ -302,6 +337,7 @@ cc_library(
     hdrs = ["es3_sampler.h"],
     deps = [
         ":es3_common",
+        ":es3_platform_context",
         "//xrtl/gfx:sampler",
     ],
 )
@@ -334,50 +370,21 @@ cc_library(
 )
 
 cc_library(
-    name = "port_swap_chain",
-    visibility = ["//visibility:private"],
-    deps = select({
-        "//xrtl/tools/target_platform:android": [],
-        "//xrtl/tools/target_platform:emscripten": [],
-        "//xrtl/tools/target_platform:ios": [],
-        "//xrtl/tools/target_platform:linux": [
-            "//xrtl/port/common/gfx/es3:egl_swap_chain",
-        ],
-        "//xrtl/tools/target_platform:macos": [],
-        "//xrtl/tools/target_platform:windows": [],
-    }),
-)
-
-cc_library(
     name = "es3_swap_chain",
     srcs = ["es3_swap_chain.cc"],
     hdrs = ["es3_swap_chain.h"],
     deps = [
         ":es3_common",
+        ":es3_image",
         ":es3_platform_context",
-        "//xrtl/gfx:memory_pool",
-        "//xrtl/gfx:swap_chain",
-        "//xrtl/ui:control",
-    ] + select({
-        # Always use EGL when targeting swiftshader, and otherwise use the
-        # port's default implementation.
-        "//xrtl/tools/target_config:swiftshader": [
-            "//xrtl/port/common/gfx/es3:egl_swap_chain",
-        ],
-        "//conditions:default": [
-            ":port_swap_chain",
-        ],
-    }),
-)
-
-cc_library(
-    name = "es3_swap_chain_hdrs",
-    hdrs = ["es3_swap_chain.h"],
-    visibility = ["//xrtl/port:ports_only"],
-    deps = [
-        ":es3_common",
-        ":es3_platform_context",
-        "//xrtl/gfx:memory_pool",
+        ":es3_queue",
+        ":es3_queue_fence",
+        "//xrtl/base:system_clock",
+        "//xrtl/base:tracing",
+        "//xrtl/base/threading:event",
+        "//xrtl/base/threading:semaphore",
+        "//xrtl/base/threading:thread",
+        "//xrtl/gfx:memory_heap",
         "//xrtl/gfx:swap_chain",
         "//xrtl/ui:control",
     ],

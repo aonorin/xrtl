@@ -242,8 +242,10 @@ ref_ptr<ES3PlatformContext> ES3PlatformContext::Create(
   auto platform_context = make_ref<EGLPlatformContext>();
 
   if (!platform_context->Initialize(
-          reinterpret_cast<EGLNativeDisplayType>(native_display),
-          reinterpret_cast<EGLNativeWindowType>(native_window),
+          reinterpret_cast<EGLNativeDisplayType>(
+              reinterpret_cast<uintptr_t>(native_display)),
+          reinterpret_cast<EGLNativeWindowType>(
+              reinterpret_cast<uintptr_t>(native_window)),
           std::move(share_group))) {
     LOG(ERROR) << "Unable to initialize the EGL platform context";
     return nullptr;
@@ -258,12 +260,7 @@ EGLPlatformContext::~EGLPlatformContext() {
   WTF_SCOPE0("EGLPlatformContext#dtor");
 
   // Finish all context operations.
-  if (egl_context_ != EGL_NO_CONTEXT) {
-    if (MakeCurrent()) {
-      Finish();
-    }
-    ClearCurrent();
-  }
+  FinishOnShutdown();
 
   if (egl_context_ != EGL_NO_CONTEXT) {
     eglDestroyContext(egl_display_, egl_context_);
@@ -392,19 +389,19 @@ bool EGLPlatformContext::InitializeContext(
 
   // Try to make the context current as it may be invalid but we won't know
   // until the first attempt. Catching the error here makes it easier to find.
-  ES3PlatformContext::ThreadLock context_lock(this);
+  ES3PlatformContext::ExclusiveLock context_lock(this);
   if (!context_lock.is_held()) {
     LOG(ERROR) << "Initial MakeCurrent failed, aborting initialization";
     return false;
   }
 
   // Setup GL functions. We only need to do this once.
+  // NOTE: GLAD is not thread safe! We must only be calling this from a single
+  //       thread.
   static std::once_flag load_gles2_flag;
   static std::atomic<bool> loaded_gles2{false};
   std::call_once(load_gles2_flag, []() {
-    if (gladLoadGLES2Loader(LookupGlesFunction)) {
-      loaded_gles2 = true;
-    }
+    loaded_gles2 = gladLoadGLES2Loader(LookupGlesFunction);
   });
   if (!loaded_gles2) {
     LOG(ERROR) << "Failed to load GL ES dynamic functions";
@@ -868,6 +865,90 @@ void EGLPlatformContext::DumpConfig(EGLDisplay egl_display,
   VLOG(1) << "  EGL_SAMPLE_BUFFERS = " << v;
 }
 
+bool EGLPlatformContext::IsCurrent() {
+  if (egl_context_ != EGL_NO_CONTEXT) {
+    return eglGetCurrentContext() == egl_context_;
+  } else {
+    return false;
+  }
+}
+
+bool EGLPlatformContext::MakeCurrent() {
+  WTF_SCOPE0("EGLPlatformContext#MakeCurrent");
+
+  DCHECK_NE(egl_display_, EGL_NO_DISPLAY);
+  DCHECK_NE(egl_context_, EGL_NO_CONTEXT);
+
+  if (IsCurrent()) {
+    // No-op.
+    return true;
+  }
+
+  debugging::LeakCheckDisabler leak_check_disabler;
+  if (!eglMakeCurrent(egl_display_, egl_surface_, egl_surface_, egl_context_)) {
+    EGLint error_code = eglGetError();
+    if (error_code == EGL_CONTEXT_LOST) {
+      // TODO(benvanik): context loss handling. Fire event?
+      return false;
+    } else {
+      LOG(ERROR) << "eglMakeCurrent failed: binding error "
+                 << GetEglErrorName(error_code) << ": "
+                 << GetEglErrorDescription(error_code);
+      return false;
+    }
+  }
+
+  return true;
+}
+
+void EGLPlatformContext::ClearCurrent() {
+  WTF_SCOPE0("EGLPlatformContext#ClearCurrent");
+  if (egl_display_ != EGL_NO_DISPLAY) {
+    eglMakeCurrent(egl_display_, EGL_NO_SURFACE, EGL_NO_SURFACE,
+                   EGL_NO_CONTEXT);
+  }
+}
+
+void EGLPlatformContext::Flush() {
+  WTF_SCOPE0("EGLPlatformContext#Flush");
+  DCHECK_NE(egl_context_, EGL_NO_CONTEXT);
+  DCHECK(IsCurrent());
+  glFlush();
+}
+
+void EGLPlatformContext::Finish() {
+  WTF_SCOPE0("EGLPlatformContext#Finish");
+  DCHECK_NE(egl_context_, EGL_NO_CONTEXT);
+  DCHECK(IsCurrent());
+  glFinish();
+}
+
+void EGLPlatformContext::FinishOnShutdown() {
+  WTF_SCOPE0("EGLPlatformContext#FinishOnShutdown");
+  if (egl_context_ == EGL_NO_CONTEXT) {
+    return;
+  }
+
+  if (egl_context_ != eglGetCurrentContext()) {
+    debugging::LeakCheckDisabler leak_check_disabler;
+    if (!eglMakeCurrent(egl_display_, egl_surface_, egl_surface_,
+                        egl_context_)) {
+      EGLint error_code = eglGetError();
+      LOG(WARNING) << "eglMakeCurrent on shutdown failed: binding error "
+                   << GetEglErrorName(error_code) << ": "
+                   << GetEglErrorDescription(error_code);
+      return;
+    }
+  }
+
+  glFinish();
+
+  if (egl_display_ != EGL_NO_DISPLAY) {
+    eglMakeCurrent(egl_display_, EGL_NO_SURFACE, EGL_NO_SURFACE,
+                   EGL_NO_CONTEXT);
+  }
+}
+
 EGLPlatformContext::RecreateSurfaceResult EGLPlatformContext::RecreateSurface(
     Size2D size_hint) {
   WTF_SCOPE0("EGLPlatformContext#RecreateSurface");
@@ -981,6 +1062,21 @@ Size2D EGLPlatformContext::QuerySize() {
   return {real_width, real_height};
 }
 
+void EGLPlatformContext::SetSwapBehavior(SwapBehavior swap_behavior) {
+  switch (swap_behavior) {
+    case SwapBehavior::kImmediate:
+      eglSwapInterval(egl_display_, 0);
+      break;
+    case SwapBehavior::kSynchronize:
+      eglSwapInterval(egl_display_, 1);
+      break;
+    case SwapBehavior::kSynchronizeAndTear:
+      // TODO(benvanik): try to use glXSwapIntervalEXT if on linux.
+      eglSwapInterval(egl_display_, 1);
+      break;
+  }
+}
+
 bool EGLPlatformContext::SwapBuffers(
     std::chrono::milliseconds present_time_utc_millis) {
   if (!native_window_) {
@@ -992,64 +1088,6 @@ bool EGLPlatformContext::SwapBuffers(
   //                 to eglPresentationTimeANDROID before eglSwapBuffers.
 
   return eglSwapBuffers(egl_display_, egl_surface_) == EGL_TRUE;
-}
-
-bool EGLPlatformContext::IsCurrent() {
-  if (egl_context_ != EGL_NO_CONTEXT) {
-    return eglGetCurrentContext() == egl_context_;
-  } else {
-    return false;
-  }
-}
-
-bool EGLPlatformContext::MakeCurrent() {
-  WTF_SCOPE0("EGLPlatformContext#MakeCurrent");
-
-  DCHECK_NE(egl_display_, EGL_NO_DISPLAY);
-  DCHECK_NE(egl_context_, EGL_NO_CONTEXT);
-
-  if (IsCurrent()) {
-    // No-op.
-    return true;
-  }
-
-  debugging::LeakCheckDisabler leak_check_disabler;
-  if (!eglMakeCurrent(egl_display_, egl_surface_, egl_surface_, egl_context_)) {
-    EGLint error_code = eglGetError();
-    if (error_code == EGL_CONTEXT_LOST) {
-      // TODO(benvanik): context loss handling. Fire event?
-      return false;
-    } else {
-      LOG(ERROR) << "eglMakeCurrent failed: binding error "
-                 << GetEglErrorName(error_code) << ": "
-                 << GetEglErrorDescription(error_code);
-      return false;
-    }
-  }
-
-  return true;
-}
-
-void EGLPlatformContext::ClearCurrent() {
-  WTF_SCOPE0("EGLPlatformContext#ClearCurrent");
-  if (egl_display_ != EGL_NO_DISPLAY) {
-    eglMakeCurrent(egl_display_, EGL_NO_SURFACE, EGL_NO_SURFACE,
-                   EGL_NO_CONTEXT);
-  }
-}
-
-void EGLPlatformContext::Flush() {
-  WTF_SCOPE0("EGLPlatformContext#Flush");
-  DCHECK_NE(egl_context_, EGL_NO_CONTEXT);
-  DCHECK(IsCurrent());
-  glFlush();
-}
-
-void EGLPlatformContext::Finish() {
-  WTF_SCOPE0("EGLPlatformContext#Finish");
-  DCHECK_NE(egl_context_, EGL_NO_CONTEXT);
-  DCHECK(IsCurrent());
-  glFinish();
 }
 
 void* EGLPlatformContext::GetExtensionProc(const char* extension_name,

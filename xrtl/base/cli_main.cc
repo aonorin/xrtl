@@ -12,14 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "xrtl/gfx/es3/es3_image_view.h"
+#include "xrtl/base/cli_main.h"
+
+#include <string>
+
+#include "xrtl/base/flags.h"
+#include "xrtl/base/logging.h"
 
 namespace xrtl {
-namespace gfx {
-namespace es3 {
 
-//
+int CliMain(int argc, char** argv) {
+  // Setup flags.
+  xrtl::flags::SetUsageMessage(std::string("\n$ ") + argv[0]);
+  xrtl::flags::ParseCommandLineFlags(&argc, &argv, true);
 
-}  // namespace es3
-}  // namespace gfx
+  int exit_code = GetCliEntryPoint()(argc, argv);
+
+  xrtl::flags::ShutDownCommandLineFlags();
+
+  return exit_code;
+}
+
 }  // namespace xrtl

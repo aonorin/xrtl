@@ -19,72 +19,54 @@
 
 #include "xrtl/base/array_view.h"
 #include "xrtl/base/ref_ptr.h"
-#include "xrtl/gfx/render_pass.h"
+#include "xrtl/gfx/resource_set_layout.h"
 
 namespace xrtl {
 namespace gfx {
 
-enum class BindingType {
-  kSampler = 0,
-  kCombinedImageSampler = 1,
-  kSampledImage = 2,
-  kStorageImage = 3,
-  kUniformTexelBuffer = 4,
-  kStorageTexelBuffer = 5,
-  kUniformBuffer = 6,
-  kStorageBuffer = 7,
-  kUniformBufferDynamic = 8,
-  kStorageBufferDynamic = 9,
-  kInputAttachment = 10,
-};
-
-struct PipelineBinding {
-  // Binding number of this entry and corresponds to a resource of the same
-  // binding number in the shader stages.
-  int binding = 0;
-  // Specifies which type of resources are used for this binding.
-  BindingType type = BindingType::kSampler;
-  // The number of slots contained in the binding, accessed in a shader as
-  // an array.
-  int array_count = 0;
-  // A bitmask specifying which pipeline shader stages can access a resource for
-  // this binding.
-  ShaderStageFlag stage_mask = ShaderStageFlag::kAll;
-};
-
-// Describes a range of push constant data within the pipeline.
-struct PushConstantRange {
-  // A set of stage flags describing the shader stages that will access a range
-  // of push constants.
-  ShaderStageFlag stage_mask = ShaderStageFlag::kNone;
-
-  // Start offset and size, respectively, consumed by the range.
-  // Both offset and size are in units of bytes and must be a multiple of 4.
-  size_t offset = 0;
-  size_t size = 0;
-};
-
 // Completely describes the layout of pipeline bindings.
 // This is used to allow multiple pipelines to share the same descriptor sets.
 //
-// In Vulkan this encompasses both a PipelineLayout and set of
-// DescriptorSetLayouts.
+// PipelineLayout roughly maps to the following backend concepts:
+// - Vulkan: pipeline layouts
 class PipelineLayout : public RefObject<PipelineLayout> {
  public:
+  // Describes a range of push constant data within the pipeline.
+  struct PushConstantRange {
+    // Start offset and size, respectively, consumed by the range.
+    // Both offset and size are in units of bytes and must be a multiple of 4.
+    size_t offset = 0;
+    size_t size = 0;
+
+    // A set of stage flags describing the shader stages that will access a
+    // range of push constants.
+    ShaderStageFlag stage_mask = ShaderStageFlag::kAll;
+
+    PushConstantRange() = default;
+    PushConstantRange(size_t offset, size_t size)
+        : offset(offset), size(size) {}
+    PushConstantRange(size_t offset, size_t size, ShaderStageFlag stage_mask)
+        : offset(offset), size(size), stage_mask(stage_mask) {}
+  };
+
   virtual ~PipelineLayout() = default;
 
-  const std::vector<PipelineBinding>& bindings() const { return bindings_; }
+  const std::vector<ref_ptr<ResourceSetLayout>>& resource_set_layouts() const {
+    return resource_set_layouts_;
+  }
   const std::vector<PushConstantRange>& push_constant_ranges() const {
     return push_constant_ranges_;
   }
 
  protected:
-  PipelineLayout(ArrayView<PipelineBinding> bindings,
-                 ArrayView<PushConstantRange> push_constant_ranges)
-      : bindings_(bindings), push_constant_ranges_(push_constant_ranges) {}
+  PipelineLayout(
+      ArrayView<ref_ptr<ResourceSetLayout>> resource_set_layouts,
+      ArrayView<PipelineLayout::PushConstantRange> push_constant_ranges)
+      : resource_set_layouts_(resource_set_layouts),
+        push_constant_ranges_(push_constant_ranges) {}
 
-  std::vector<PipelineBinding> bindings_;
-  std::vector<PushConstantRange> push_constant_ranges_;
+  std::vector<ref_ptr<ResourceSetLayout>> resource_set_layouts_;
+  std::vector<PipelineLayout::PushConstantRange> push_constant_ranges_;
 };
 
 }  // namespace gfx

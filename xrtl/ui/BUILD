@@ -13,6 +13,7 @@ cc_library(
     srcs = ["control.cc"],
     hdrs = ["control.h"],
     deps = [
+        ":input_events",
         "//xrtl/base:geometry",
         "//xrtl/base:macros",
         "//xrtl/base:ref_ptr",
@@ -34,6 +35,7 @@ cc_library(
     hdrs = ["control.h"],
     visibility = ["//xrtl/port:ports_only"],
     deps = [
+        ":input_events",
         "//xrtl/base:geometry",
         "//xrtl/base:macros",
         "//xrtl/base:ref_ptr",
@@ -58,6 +60,62 @@ cc_test(
         "//xrtl/testing:gtest_main",
         "//xrtl/ui/testing:mock_control_listener",
     ],
+)
+
+cc_library(
+    name = "display_link",
+    hdrs = ["display_link.h"],
+    deps = [
+        "//xrtl/base:ref_ptr",
+    ],
+)
+
+cc_library(
+    name = "imgui_overlay",
+    srcs = ["imgui_overlay.cc"],
+    hdrs = ["imgui_overlay.h"],
+    deps = [
+        ":control",
+        "//third_party/imgui",
+        "//third_party/proggy_fonts:proggy_tiny_embedded",
+        "//xrtl/base:macros",
+        "//xrtl/base:system_clock",
+        "//xrtl/gfx:context",
+        "//xrtl/ui/shaders:imgui_overlay_frag",
+        "//xrtl/ui/shaders:imgui_overlay_vert",
+        "@com_github_gtruc_glm//:glm",
+    ],
+)
+
+cc_binary(
+    name = "imgui_overlay_demo",
+    srcs = ["imgui_overlay_demo.cc"],
+    deps = [
+        ":display_link",
+        ":imgui_overlay",
+        ":window",
+        "//xrtl/base:logging",
+        "//xrtl/base/threading:event",
+        "//xrtl/base/threading:thread",
+        "//xrtl/gfx:context",
+        "//xrtl/gfx:context_factory",
+        "//xrtl/testing:demo_main",
+    ],
+)
+
+cc_library(
+    name = "input_events",
+    hdrs = ["input_events.h"],
+    deps = [
+        ":key_codes",
+        "//xrtl/base:geometry",
+        "//xrtl/base:macros",
+    ],
+)
+
+cc_library(
+    name = "key_codes",
+    hdrs = ["key_codes.h"],
 )
 
 cc_library(

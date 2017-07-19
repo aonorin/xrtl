@@ -24,7 +24,7 @@
 #include "xrtl/gfx/buffer.h"
 #include "xrtl/gfx/image.h"
 #include "xrtl/gfx/image_view.h"
-#include "xrtl/gfx/pipeline_layout.h"
+#include "xrtl/gfx/resource_set_layout.h"
 #include "xrtl/gfx/sampler.h"
 
 namespace xrtl {
@@ -32,12 +32,24 @@ namespace gfx {
 
 // A set of bindings for a particular PipelineLayout.
 // Bindings can be used across multiple Pipelines that share the same layout.
+//
+// When a particular set of resource bindings is immutable it's recommended to
+// retain that ResourceSet instance and reuse it across many command buffers.
+// If the set of resource bindings may change during execution (whether within
+// the same command buffer or across command buffers) it's recommended to split
+// the immutable from the mutable and create one-shot ResourceSet instances for
+// the mutable portions.
+//
+// ResourceSet roughly maps to the following backend concepts:
+// - D3D12: descriptor tables
+// - Metal: argument buffers
+// - Vulkan: descriptor sets
 class ResourceSet : public RefObject<ResourceSet> {
  public:
   // Describes a single binding slot within the resource set.
-  struct Binding {
+  struct BindingValue {
     // Array element children.
-    std::vector<Binding> elements;
+    std::vector<BindingValue> elements;
 
     // Buffer bound to the slot, or nullptr for none.
     ref_ptr<Buffer> buffer;
@@ -56,31 +68,31 @@ class ResourceSet : public RefObject<ResourceSet> {
     // Sampler used for the image.
     ref_ptr<Sampler> sampler;
 
-    Binding() = default;
+    BindingValue() = default;
 
     // Binding slot used for arrays of bindings.
-    Binding(ArrayView<Binding> elements)  // NOLINT
+    BindingValue(ArrayView<BindingValue> elements)  // NOLINT
         : elements(elements) {}
 
     // Binding slot used for kUniformBuffer and kStorageBuffer.
-    Binding(ref_ptr<Buffer> buffer)  // NOLINT
+    BindingValue(ref_ptr<Buffer> buffer)  // NOLINT
         : buffer(std::move(buffer)) {}
-    Binding(ref_ptr<Buffer> buffer, size_t offset, size_t length)
+    BindingValue(ref_ptr<Buffer> buffer, size_t offset, size_t length)
         : buffer(std::move(buffer)),
           buffer_offset(offset),
           buffer_length(length) {}
 
     // Binding slot used for kSampledImage, kStorageImage, and kInputAttachment.
-    Binding(ref_ptr<ImageView> image_view, Image::Layout image_layout)
+    BindingValue(ref_ptr<ImageView> image_view, Image::Layout image_layout)
         : image_view(std::move(image_view)), image_layout(image_layout) {}
 
     // Binding slot used for kSampler.
-    Binding(ref_ptr<Sampler> sampler)  // NOLINT
+    BindingValue(ref_ptr<Sampler> sampler)  // NOLINT
         : sampler(std::move(sampler)) {}
 
     // Binding slot used for kCombinedImageSampler.
-    Binding(ref_ptr<ImageView> image_view, Image::Layout image_layout,
-            ref_ptr<Sampler> sampler)
+    BindingValue(ref_ptr<ImageView> image_view, Image::Layout image_layout,
+                 ref_ptr<Sampler> sampler)
         : image_view(std::move(image_view)),
           image_layout(image_layout),
           sampler(std::move(sampler)) {}
@@ -88,19 +100,22 @@ class ResourceSet : public RefObject<ResourceSet> {
 
   virtual ~ResourceSet() = default;
 
-  // Layout the pipeline binding set uses.
-  ref_ptr<PipelineLayout> layout() const { return layout_; }
+  // Layout the resource set uses.
+  ref_ptr<ResourceSetLayout> layout() const { return layout_; }
 
   // All bindings for the resource set.
-  const std::vector<Binding>& bindings() const { return bindings_; }
+  const std::vector<BindingValue>& binding_values() const {
+    return binding_values_;
+  }
 
  protected:
-  explicit ResourceSet(ref_ptr<PipelineLayout> layout,
-                       ArrayView<Binding> bindings)
-      : layout_(std::move(layout)), bindings_(bindings) {}
+  explicit ResourceSet(ref_ptr<ResourceSetLayout> resource_set_layout,
+                       ArrayView<BindingValue> binding_values)
+      : layout_(std::move(resource_set_layout)),
+        binding_values_(binding_values) {}
 
-  ref_ptr<PipelineLayout> layout_;
-  std::vector<Binding> bindings_;
+  ref_ptr<ResourceSetLayout> layout_;
+  std::vector<BindingValue> binding_values_;
 };
 
 }  // namespace gfx

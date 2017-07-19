@@ -84,6 +84,22 @@ class ES3TransferCommandEncoder : public TransferCommandEncoder {
                          Image::Layout source_image_layout,
                          ref_ptr<Buffer> target_buffer,
                          ArrayView<CopyBufferImageRegion> regions) override;
+
+ protected:
+  friend class ES3ComputeCommandEncoder;
+  friend class ES3RenderCommandEncoder;
+  friend class ES3RenderPassCommandEncoder;
+
+  // These methods are not transfer related but here because we reuse this
+  // type as the common encoder.
+  void SetFence(ref_ptr<CommandFence> fence,
+                PipelineStageFlag pipeline_stage_mask);
+  void ResetFence(ref_ptr<CommandFence> fence,
+                  PipelineStageFlag pipeline_stage_mask);
+  void WaitFences(ArrayView<ref_ptr<CommandFence>> fences);
+  void ClearColorImage(ref_ptr<Image> image, Image::Layout image_layout,
+                       ClearColor clear_color,
+                       ArrayView<Image::LayerRange> ranges);
 };
 
 class ES3ComputeCommandEncoder : public ComputeCommandEncoder {
@@ -154,7 +170,7 @@ class ES3ComputeCommandEncoder : public ComputeCommandEncoder {
 
   void BindPipeline(ref_ptr<ComputePipeline> pipeline) override;
 
-  void BindResourceSet(ref_ptr<ResourceSet> resource_set,
+  void BindResourceSet(int set_index, ref_ptr<ResourceSet> resource_set,
                        ArrayView<size_t> dynamic_offsets) override;
 
   void PushConstants(ref_ptr<PipelineLayout> pipeline_layout,
@@ -165,6 +181,9 @@ class ES3ComputeCommandEncoder : public ComputeCommandEncoder {
                 int group_count_z) override;
 
   void DispatchIndirect(ref_ptr<Buffer> buffer, size_t offset) override;
+
+ private:
+  ES3TransferCommandEncoder common_encoder_;
 };
 
 class ES3RenderCommandEncoder : public RenderCommandEncoder {
@@ -249,6 +268,9 @@ class ES3RenderCommandEncoder : public RenderCommandEncoder {
                     ArrayView<CopyImageRegion> regions) override;
 
   void GenerateMipmaps(ref_ptr<Image> image) override;
+
+ private:
+  ES3TransferCommandEncoder common_encoder_;
 };
 
 class ES3RenderPassCommandEncoder : public RenderPassCommandEncoder {
@@ -319,7 +341,7 @@ class ES3RenderPassCommandEncoder : public RenderPassCommandEncoder {
 
   void BindPipeline(ref_ptr<RenderPipeline> pipeline) override;
 
-  void BindResourceSet(ref_ptr<ResourceSet> resource_set,
+  void BindResourceSet(int set_index, ref_ptr<ResourceSet> resource_set,
                        ArrayView<size_t> dynamic_offsets) override;
 
   void PushConstants(ref_ptr<PipelineLayout> pipeline_layout,
@@ -351,9 +373,35 @@ class ES3RenderPassCommandEncoder : public RenderPassCommandEncoder {
 
   // Prepares the current subpass state.
   void PrepareSubpass();
+  // Finishes a subpass before the next executes (or the render pass ends).
+  void FinishSubpass();
 
+  // Refreshes the GL state machine with the given XRTL state.
+  void RefreshVertexInputState(
+      const RenderState::VertexInputState& vertex_input_state);
+  void RefreshInputAssemblyState(
+      const RenderState::InputAssemblyState& input_assembly_state);
+  void RefreshTessellationState(
+      const RenderState::TessellationState& tessellation_state);
+  void RefreshViewportState(const RenderState::ViewportState& viewport_state);
+  void RefreshRasterizationState(
+      const RenderState::RasterizationState& rasterization_state);
+  void RefreshMultisampleState(
+      const RenderState::MultisampleState& multisample_state);
+  void RefreshDepthStencilState(
+      const RenderState::DepthStencilState& depth_stencil_state);
+  void RefreshColorBlendState(
+      int attachment_index,
+      const RenderState::ColorBlendAttachmentState& attachment_state);
+
+  // Updates push constant data for the current pipeline.
+  void UpdatePushConstants();
+  // Updates the resource set binding based on the current pipeline and set.
+  void UpdateResourceSets();
   // Updates all vertex inputs based on the current bindings and pipeline.
   void UpdateVertexInputs();
+
+  ES3TransferCommandEncoder common_encoder_;
 
   ref_ptr<RenderPass> render_pass_;
   ref_ptr<Framebuffer> framebuffer_;
@@ -367,6 +415,14 @@ class ES3RenderPassCommandEncoder : public RenderPassCommandEncoder {
 
   Rect2D scissor_rect_{0, 0, 16 * 1024, 16 * 1024};
 
+  ref_ptr<ResourceSet> resource_sets_[kMaxResourceSetCount];
+  std::vector<size_t> dynamic_offsets_[kMaxResourceSetCount];
+  bool resource_sets_dirty_ = true;
+  uint32_t texture_binding_mask_ = 0;
+  uint32_t uniform_buffer_binding_mask_ = 0;
+  std::vector<uint8_t> push_constant_data_;
+  bool push_constants_dirty_ = true;
+
   // Array indices are binding and location, respectively.
   struct VertexBufferBinding {
     ref_ptr<Buffer> buffer;
@@ -374,7 +430,7 @@ class ES3RenderPassCommandEncoder : public RenderPassCommandEncoder {
     size_t stride = 0;
     VertexInputRate input_rate = VertexInputRate::kVertex;
   };
-  FixedVector<VertexBufferBinding, kMaxVertexInputs> vertex_buffer_bindings_;
+  VertexBufferBinding vertex_buffer_bindings_[kMaxVertexInputs];
   struct VertexBufferAttribs {
     int binding = -1;  // -1 indicates unused
     size_t offset = 0;
@@ -383,6 +439,7 @@ class ES3RenderPassCommandEncoder : public RenderPassCommandEncoder {
   FixedVector<VertexBufferAttribs, kMaxVertexInputs> vertex_buffer_attribs_;
   bool vertex_inputs_dirty_ = true;
   uint32_t vertex_attrib_enable_mask_ = 0;
+  GLuint scratch_vao_id_ = 0;
 
   ref_ptr<Buffer> index_buffer_;
   size_t index_buffer_offset_ = 0;

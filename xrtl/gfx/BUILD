@@ -75,6 +75,7 @@ cc_library(
 
 cc_library(
     name = "context",
+    srcs = ["context.cc"],
     hdrs = ["context.h"],
     deps = [
         ":command_buffer",
@@ -82,7 +83,7 @@ cc_library(
         ":device",
         ":framebuffer",
         ":image_view",
-        ":memory_pool",
+        ":memory_heap",
         ":pipeline",
         ":pipeline_layout",
         ":pixel_format",
@@ -110,7 +111,9 @@ cc_library(
             "//xrtl/gfx/es3:es3_context_factory",
         ],
         "//xrtl/tools/target_platform:macos": [],
-        "//xrtl/tools/target_platform:windows": [],
+        "//xrtl/tools/target_platform:windows": [
+            "//xrtl/gfx/es3:es3_context_factory",
+        ],
     }),
 )
 
@@ -197,8 +200,9 @@ cc_library(
 )
 
 cc_library(
-    name = "memory_pool",
-    hdrs = ["memory_pool.h"],
+    name = "memory_heap",
+    srcs = ["memory_heap.cc"],
+    hdrs = ["memory_heap.h"],
     deps = [
         ":buffer",
         ":image",
@@ -223,7 +227,7 @@ cc_library(
     name = "pipeline_layout",
     hdrs = ["pipeline_layout.h"],
     deps = [
-        ":render_pass",
+        ":resource_set_layout",
         "//xrtl/base:array_view",
         "//xrtl/base:ref_ptr",
     ],
@@ -295,8 +299,18 @@ cc_library(
         ":buffer",
         ":image",
         ":image_view",
-        ":pipeline_layout",
+        ":resource_set_layout",
         ":sampler",
+        "//xrtl/base:array_view",
+        "//xrtl/base:ref_ptr",
+    ],
+)
+
+cc_library(
+    name = "resource_set_layout",
+    hdrs = ["resource_set_layout.h"],
+    deps = [
+        ":render_pass",
         "//xrtl/base:array_view",
         "//xrtl/base:ref_ptr",
     ],
@@ -320,6 +334,7 @@ cc_library(
 
 cc_library(
     name = "swap_chain",
+    srcs = ["swap_chain.cc"],
     hdrs = ["swap_chain.h"],
     deps = [
         ":command_buffer",

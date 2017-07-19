@@ -15,7 +15,7 @@
 #ifndef XRTL_GFX_ES3_ES3_CONTEXT_H_
 #define XRTL_GFX_ES3_ES3_CONTEXT_H_
 
-#include <queue>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -29,6 +29,8 @@
 namespace xrtl {
 namespace gfx {
 namespace es3 {
+
+class ES3Queue;
 
 class ES3Context : public Context {
  public:
@@ -56,8 +58,9 @@ class ES3Context : public Context {
                                            size_t data_length) override;
 
   ref_ptr<PipelineLayout> CreatePipelineLayout(
-      ArrayView<PipelineBinding> bindings,
-      ArrayView<PushConstantRange> push_constant_ranges) override;
+      ArrayView<ref_ptr<ResourceSetLayout>> resource_set_layouts,
+      ArrayView<PipelineLayout::PushConstantRange> push_constant_ranges)
+      override;
 
   ref_ptr<ComputePipeline> CreateComputePipeline(
       ref_ptr<PipelineLayout> pipeline_layout,
@@ -69,16 +72,19 @@ class ES3Context : public Context {
       int render_subpass, RenderState render_state,
       RenderPipeline::ShaderStages shader_stages) override;
 
+  ref_ptr<ResourceSetLayout> CreateResourceSetLayout(
+      ArrayView<ResourceSetLayout::BindingSlot> binding_slots) override;
+
   ref_ptr<ResourceSet> CreateResourceSet(
-      ref_ptr<PipelineLayout> pipeline_layout,
-      ArrayView<ResourceSet::Binding> bindings) override;
+      ref_ptr<ResourceSetLayout> resource_set_layout,
+      ArrayView<ResourceSet::BindingValue> binding_values) override;
 
   ref_ptr<SwapChain> CreateSwapChain(
       ref_ptr<ui::Control> control, SwapChain::PresentMode present_mode,
       int image_count, ArrayView<PixelFormat> pixel_formats) override;
 
-  ref_ptr<MemoryPool> CreateMemoryPool(MemoryType memory_type_mask,
-                                       size_t chunk_size) override;
+  ref_ptr<MemoryHeap> CreateMemoryHeap(MemoryType memory_type_mask,
+                                       size_t heap_size) override;
 
   ref_ptr<Sampler> CreateSampler(Sampler::Params params) override;
 
@@ -113,28 +119,10 @@ class ES3Context : public Context {
   // Other contexts are used for queue management and swap chains.
   ref_ptr<ES3PlatformContext> platform_context_;
 
-  // Thread that executes command buffers.
-  ref_ptr<Thread> queue_thread_;
-  ref_ptr<Event> queue_work_pending_event_;
-  ref_ptr<Event> queue_work_completed_event_;
-  std::mutex queue_mutex_;
-  bool queue_running_ = true;
-  struct QueueEntry {
-    std::vector<ref_ptr<QueueFence>> wait_queue_fences;
-    std::vector<ref_ptr<CommandBuffer>> command_buffers;
-    std::vector<ref_ptr<QueueFence>> signal_queue_fences;
-    ref_ptr<Event> signal_handle;
-    QueueEntry() = default;
-    QueueEntry(ArrayView<ref_ptr<QueueFence>> wait_queue_fences,
-               ArrayView<ref_ptr<CommandBuffer>> command_buffers,
-               ArrayView<ref_ptr<QueueFence>> signal_queue_fences,
-               ref_ptr<Event> signal_handle)
-        : wait_queue_fences(wait_queue_fences),
-          command_buffers(command_buffers),
-          signal_queue_fences(signal_queue_fences),
-          signal_handle(std::move(signal_handle)) {}
-  };
-  std::queue<QueueEntry> queue_;
+  // Primary command queue that owns the dedicated submission thread.
+  std::unique_ptr<ES3Queue> primary_queue_;
+  // Presentation queue used for swap chain presents.
+  std::unique_ptr<ES3Queue> presentation_queue_;
 };
 
 }  // namespace es3

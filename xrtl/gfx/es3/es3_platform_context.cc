@@ -14,7 +14,12 @@
 
 #include "xrtl/gfx/es3/es3_platform_context.h"
 
+#include "xrtl/base/flags.h"
 #include "xrtl/base/threading/thread.h"
+
+DEFINE_bool(gl_debug_log, true, "Dump KHR_debug output to the log.");
+DEFINE_bool(gl_debug_log_synchronous, true,
+            "KHR_debug will synchronize to be thread safe.");
 
 namespace xrtl {
 namespace gfx {
@@ -34,6 +39,93 @@ Thread::LocalStorageSlot<ES3PlatformContext> thread_context_slot_{
       thread_context->ReleaseReference();
     }};
 
+// Currently locked context on the thread. May be null if none is locked.
+Thread::LocalStorageSlot<ES3PlatformContext> locked_context_slot_{
+    [](ES3PlatformContext* thread_context) {
+      // Clear the context so it's not bound.
+      thread_context->ClearCurrent();
+
+      // Drop reference - this may delete the thread context.
+      thread_context->ReleaseReference();
+    }};
+
+extern "C" void OnDebugMessage(GLenum source, GLenum type, GLuint id,
+                               GLenum severity, GLsizei length,
+                               const GLchar* message, GLvoid* user_param) {
+  const char* source_name = "Unknown";
+  switch (source) {
+    case GL_DEBUG_SOURCE_API:
+      source_name = "OpenGL";
+      break;
+    case GL_DEBUG_SOURCE_WINDOW_SYSTEM:
+      source_name = "Windows";
+      break;
+    case GL_DEBUG_SOURCE_SHADER_COMPILER:
+      source_name = "Shader Compiler";
+      break;
+    case GL_DEBUG_SOURCE_THIRD_PARTY:
+      source_name = "Third Party";
+      break;
+    case GL_DEBUG_SOURCE_APPLICATION:
+      source_name = "Application";
+      break;
+    case GL_DEBUG_SOURCE_OTHER:
+      source_name = "Other";
+      break;
+  }
+
+  const char* type_name = "unknown";
+  switch (type) {
+    case GL_DEBUG_TYPE_ERROR:
+      type_name = "error";
+      break;
+    case GL_DEBUG_TYPE_DEPRECATED_BEHAVIOR:
+      type_name = "deprecated behavior";
+      break;
+    case GL_DEBUG_TYPE_UNDEFINED_BEHAVIOR:
+      type_name = "undefined behavior";
+      break;
+    case GL_DEBUG_TYPE_PORTABILITY:
+      type_name = "portability";
+      break;
+    case GL_DEBUG_TYPE_PERFORMANCE:
+      type_name = "performance";
+      break;
+    case GL_DEBUG_TYPE_OTHER:
+      type_name = "message";
+      break;
+    case GL_DEBUG_TYPE_MARKER:
+      type_name = "marker";
+      break;
+    case GL_DEBUG_TYPE_PUSH_GROUP:
+      type_name = "push group";
+      break;
+    case GL_DEBUG_TYPE_POP_GROUP:
+      type_name = "pop group";
+      break;
+  }
+
+  int glog_severity = ::xrtl::INFO;
+  switch (severity) {
+    case GL_DEBUG_SEVERITY_HIGH:
+      glog_severity = ::xrtl::ERROR;
+      break;
+    case GL_DEBUG_SEVERITY_MEDIUM:
+      glog_severity = ::xrtl::WARNING;
+      break;
+    case GL_DEBUG_SEVERITY_LOW:
+      glog_severity = ::xrtl::INFO;
+      break;
+    case GL_DEBUG_SEVERITY_NOTIFICATION:
+      glog_severity = ::xrtl::INFO;
+      break;
+  }
+
+  ::xrtl::internal::LogMessage(__FILE__, __LINE__, glog_severity)
+      << "GL::" << source_name << ": " << type_name << " #" << id << ", "
+      << message;
+}
+
 }  // namespace
 
 ES3PlatformContext::ES3PlatformContext() = default;
@@ -50,7 +142,7 @@ ref_ptr<ES3PlatformContext> ES3PlatformContext::AcquireThreadContext(
   }
 
   // Attempt to create a new context for the thread.
-  thread_context = Create(existing_context);
+  thread_context = Create(std::move(existing_context));
   if (!thread_context) {
     LOG(ERROR) << "Unable to create a new thread-locked context";
     return nullptr;
@@ -87,6 +179,18 @@ void ES3PlatformContext::ReleaseThreadContext() {
   //       destroyed.
 }
 
+ES3PlatformContext::ThreadLock ES3PlatformContext::LockTransientContext(
+    ref_ptr<ES3PlatformContext> existing_context) {
+  // See if we already have a context locked. If so, we can just reuse that.
+  ref_ptr<ES3PlatformContext> locked_context{locked_context_slot_.value()};
+  if (locked_context) {
+    return ThreadLock(locked_context);
+  }
+
+  // No currently locked context, use the thread-locked one.
+  return ThreadLock(AcquireThreadContext(std::move(existing_context)));
+}
+
 bool ES3PlatformContext::Lock(bool clear_on_unlock,
                               std::unique_lock<std::recursive_mutex>* lock) {
   std::unique_lock<std::recursive_mutex> lock_guard(usage_mutex_);
@@ -95,10 +199,17 @@ bool ES3PlatformContext::Lock(bool clear_on_unlock,
   // If you're getting an error here it means that some other context is locked
   // while this lock was attempted. Don't do that.
   DCHECK(lock_depth_ == 1 || IsCurrent());
+  ref_ptr<ES3PlatformContext> locked_context{locked_context_slot_.value()};
+  DCHECK(!locked_context || locked_context.get() == this);
 
   if (lock_depth_ == 1) {
     // The first lock decides whether this is really exclusive or thread-local.
     clear_on_unlock_ = clear_on_unlock;
+
+    // Stash in TLS for reuse.
+    AddReference();
+    locked_context_slot_.set_value(this);
+
     if (!MakeCurrent()) {
       --lock_depth_;
       return false;
@@ -112,14 +223,62 @@ void ES3PlatformContext::Unlock(std::unique_lock<std::recursive_mutex> lock) {
   DCHECK_GE(lock_depth_, 1);
   --lock_depth_;
   if (lock_depth_ == 0) {
+    // NOTE: the flush is required to ensure changes on this context make it
+    // to other contexts.
+    Flush();
     if (clear_on_unlock_) {
       ClearCurrent();
     }
+
+    // Clear the TLS slot.
+    ref_ptr<ES3PlatformContext> locked_context{locked_context_slot_.value()};
+    DCHECK(locked_context && locked_context.get() == this);
+    ReleaseReference();
+    locked_context_slot_.set_value(nullptr);
   }
   lock.unlock();
 }
 
+void ES3PlatformContext::InitializeDebugging() {
+  if (glDebugMessageCallback == nullptr) {
+    // Not supported; ignore.
+    return;
+  }
+
+  glEnable(GL_DEBUG_OUTPUT);
+
+  // Synchronous logging makes log outputs easier to read.
+  if (FLAGS_gl_debug_log_synchronous) {
+    glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS);
+  } else {
+    glDisable(GL_DEBUG_OUTPUT_SYNCHRONOUS);
+  }
+
+  // Enable everything by default.
+  glDebugMessageControl(GL_DONT_CARE, GL_DONT_CARE, GL_DONT_CARE, 0, NULL,
+                        GL_TRUE);
+
+  // Disable messages that don't mean much for us.
+  GLuint disable_message_ids[] = {
+      131185,  // Buffer detailed info : Buffer object 1 (bound to
+               // GL_ARRAY_BUFFER_ARB, usage hint is GL_STREAM_DRAW) will use
+               // VIDEO memory as the source for buffer object operations.
+  };
+  glDebugMessageControl(GL_DEBUG_SOURCE_API, GL_DEBUG_TYPE_OTHER, GL_DONT_CARE,
+                        static_cast<GLsizei>(count_of(disable_message_ids)),
+                        disable_message_ids, GL_FALSE);
+
+  // Callback will be made from driver threads.
+  glDebugMessageCallback(reinterpret_cast<GLDEBUGPROC>(&OnDebugMessage), this);
+}
+
 bool ES3PlatformContext::InitializeExtensions() {
+  // Initialize debugging API, if we want it.
+  // We should do this ASAP to start getting enhanced logging.
+  if (FLAGS_gl_debug_log) {
+    InitializeDebugging();
+  }
+
   // TODO(benvanik): extension support.
   return true;
 }

@@ -18,6 +18,7 @@
 #include <mutex>
 #include <utility>
 
+#include "xrtl/base/geometry.h"
 #include "xrtl/base/ref_ptr.h"
 #include "xrtl/gfx/es3/es3_common.h"
 
@@ -42,6 +43,130 @@ namespace es3 {
 // ends.
 class ES3PlatformContext : public RefObject<ES3PlatformContext> {
  public:
+  // RAII usage lock for use of a context on the current thread.
+  // No other thread will be able to use the context until the Lock is
+  // reset. If this is called repeatedly from the same thread the cost will be
+  // low however performance will degrade rapidly if multiple threads are
+  // attempting to acquire the lock.
+  //
+  // It's possible for a lock to fail if the context cannot be acquired (such
+  // as when it is lost/destroyed). Use is_held to check this before attempting
+  // to use the context.
+  //
+  // The context will remain bound to the current thread after the lock has
+  // yielded.
+  //
+  // Usage:
+  //  {
+  //    // Acquire lock for this scope.
+  //    ES3PlatformContext::ThreadLock context_lock(context);
+  //    DCHECK(context_lock.is_held());
+  //    // Use context here.
+  //  }
+  //  // NOTE: context may still be bound here, but don't trust it.
+  class ThreadLock {
+   public:
+    ThreadLock() = default;
+    ThreadLock(ThreadLock&& other) {  // NOLINT
+      std::swap(context_, other.context_);
+      lock_ = std::move(other.lock_);
+    }
+    explicit ThreadLock(ES3PlatformContext* context)
+        : ThreadLock(ref_ptr<ES3PlatformContext>(context)) {}
+    explicit ThreadLock(ref_ptr<ES3PlatformContext> context) {
+      reset(std::move(context));
+    }
+    ~ThreadLock() { reset(); }
+
+    // Returns true if the context thread lock is held.
+    bool is_held() const { return context_ != nullptr; }
+
+    // Unlocks the context lock.
+    void reset() { reset(nullptr); }
+
+    // Locks the given context, unlocking the previous context (if any).
+    void reset(ref_ptr<ES3PlatformContext> context) {
+      if (context == context_) {
+        return;
+      }
+      if (context_) {
+        context_->Unlock(std::move(lock_));
+        context_.reset();
+      }
+      context_ = std::move(context);
+      if (context_ && !context_->Lock(false, &lock_)) {
+        context_ = nullptr;
+      }
+    }
+
+   private:
+    ref_ptr<ES3PlatformContext> context_;
+    std::unique_lock<std::recursive_mutex> lock_;
+  };
+
+  // RAII usage lock for use of a context on the current thread.
+  // No other thread will be able to use the context until the lock is
+  // reset. Once the lock is released the context will be cleared from the
+  // current thread, meaning that back-to-back locking of the same context will
+  // incur the same costs as locking any other context.
+  //
+  // It's possible for a lock to fail if the context cannot be acquired (such
+  // as when it is lost/destroyed). Use is_held to check this before attempting
+  // to use the context.
+  //
+  // Usage:
+  //  {
+  //    // Acquire lock for this scope.
+  //    ES3PlatformContext::ExclusiveLock context_lock(context);
+  //    DCHECK(context_lock.is_held());
+  //    // Use context here.
+  //  }
+  //  // NOTE: context will not be bound here.
+  class ExclusiveLock {
+   public:
+    ExclusiveLock() = default;
+    ExclusiveLock(ExclusiveLock&& other) {  // NOLINT
+      std::swap(context_, other.context_);
+      lock_ = std::move(other.lock_);
+    }
+    explicit ExclusiveLock(ES3PlatformContext* context)
+        : ExclusiveLock(ref_ptr<ES3PlatformContext>(context)) {}
+    explicit ExclusiveLock(ref_ptr<ES3PlatformContext> context) {
+      reset(std::move(context));
+    }
+    ~ExclusiveLock() { reset(); }
+    ExclusiveLock& operator=(ExclusiveLock& other) {  // NOLINT
+      context_ = std::move(other.context_);
+      lock_ = std::move(other.lock_);
+      return *this;
+    }
+
+    // Returns true if the context thread lock is held.
+    bool is_held() const { return context_ != nullptr; }
+
+    // Unlocks the context lock.
+    void reset() { reset(nullptr); }
+
+    // Locks the given context, unlocking the previous context (if any).
+    void reset(ref_ptr<ES3PlatformContext> context) {
+      if (context == context_) {
+        return;
+      }
+      if (context_) {
+        context_->Unlock(std::move(lock_));
+        context_.reset();
+      }
+      context_ = std::move(context);
+      if (context_ && !context_->Lock(true, &lock_)) {
+        context_ = nullptr;
+      }
+    }
+
+   private:
+    ref_ptr<ES3PlatformContext> context_;
+    std::unique_lock<std::recursive_mutex> lock_;
+  };
+
   // Creates a new platform context.
   // If a display and window is provided the context will be created compatible
   // with that pair and otherwise it will be created for offscreen use.
@@ -79,6 +204,13 @@ class ES3PlatformContext : public RefObject<ES3PlatformContext> {
   // Calling AcquireThreadContext will recreate a new context for the thread.
   static void ReleaseThreadContext();
 
+  // Acquires a context to use for short operations.
+  // If a context is already made current on the calling thread this will return
+  // that context. Otherwise, this will return a thread-locked context as if
+  // AcquireThreadContext had been used.
+  static ThreadLock LockTransientContext(
+      ref_ptr<ES3PlatformContext> existing_context);
+
   virtual ~ES3PlatformContext();
 
   // Native platform context handle (such as EGLContext).
@@ -95,111 +227,6 @@ class ES3PlatformContext : public RefObject<ES3PlatformContext> {
   virtual bool MakeCurrent() = 0;
   // Clears the context from the current thread.
   virtual void ClearCurrent() = 0;
-
-  // RAII usage lock for use of a context on the current thread.
-  // No other thread will be able to use the context until the Lock is
-  // reset. If this is called repeatedly from the same thread the cost will be
-  // low however performance will degrade rapidly if multiple threads are
-  // attempting to acquire the lock.
-  //
-  // It's possible for a lock to fail if the context cannot be acquired (such
-  // as when it is lost/destroyed). Use is_held to check this before attempting
-  // to use the context.
-  //
-  // The context will remain bound to the current thread after the lock has
-  // yielded.
-  //
-  // Usage:
-  //  {
-  //    // Acquire lock for this scope.
-  //    ES3PlatformContext::ThreadLock context_lock(context);
-  //    DCHECK(context_lock.is_held());
-  //    // Use context here.
-  //  }
-  //  // NOTE: context may still be bound here, but don't trust it.
-  class ThreadLock {
-   public:
-    ThreadLock() = default;
-    ThreadLock(ThreadLock&& other) {  // NOLINT
-      std::swap(context_, other.context_);
-      lock_ = std::move(other.lock_);
-    }
-    explicit ThreadLock(ES3PlatformContext* context)
-        : ThreadLock(ref_ptr<ES3PlatformContext>(context)) {}
-    explicit ThreadLock(ref_ptr<ES3PlatformContext> context)
-        : context_(context) {
-      if (context && !context->Lock(false, &lock_)) {
-        context_ = nullptr;
-      }
-    }
-    ~ThreadLock() { reset(); }
-
-    // Returns true if the context thread lock is held.
-    bool is_held() const { return context_ != nullptr; }
-
-    // Unlocks the context lock.
-    void reset() {
-      if (context_) {
-        context_->Unlock(std::move(lock_));
-        context_.reset();
-      }
-    }
-
-   private:
-    ref_ptr<ES3PlatformContext> context_;
-    std::unique_lock<std::recursive_mutex> lock_;
-  };
-
-  // RAII usage lock for use of a context on the current thread.
-  // No other thread will be able to use the context until the lock is
-  // reset. Once the lock is released the context will be cleared from the
-  // current thread, meaning that back-to-back locking of the same context will
-  // incur the same costs as locking any other context.
-  //
-  // It's possible for a lock to fail if the context cannot be acquired (such
-  // as when it is lost/destroyed). Use is_held to check this before attempting
-  // to use the context.
-  //
-  // Usage:
-  //  {
-  //    // Acquire lock for this scope.
-  //    ES3PlatformContext::ExclusiveLock context_lock(context);
-  //    DCHECK(context_lock.is_held());
-  //    // Use context here.
-  //  }
-  //  // NOTE: context will not be bound here.
-  class ExclusiveLock {
-   public:
-    ExclusiveLock() = default;
-    ExclusiveLock(ExclusiveLock&& other) {  // NOLINT
-      std::swap(context_, other.context_);
-      lock_ = std::move(other.lock_);
-    }
-    explicit ExclusiveLock(ES3PlatformContext* context)
-        : ExclusiveLock(ref_ptr<ES3PlatformContext>(context)) {}
-    explicit ExclusiveLock(ref_ptr<ES3PlatformContext> context)
-        : context_(context) {
-      if (context && !context->Lock(true, &lock_)) {
-        context_ = nullptr;
-      }
-    }
-    ~ExclusiveLock() { reset(); }
-
-    // Returns true if the context thread lock is held.
-    bool is_held() const { return context_ != nullptr; }
-
-    // Unlocks the context lock.
-    void reset() {
-      if (context_) {
-        context_->Unlock(std::move(lock_));
-        context_.reset();
-      }
-    }
-
-   private:
-    ref_ptr<ES3PlatformContext> context_;
-    std::unique_lock<std::recursive_mutex> lock_;
-  };
 
   // Flushes the context without synchronizing with the GPU.
   virtual void Flush() = 0;
@@ -229,11 +256,56 @@ class ES3PlatformContext : public RefObject<ES3PlatformContext> {
     return reinterpret_cast<T>(GetExtensionProc(extension_name, proc_name));
   }
 
+  // Defines the result of RecreateSurface operation.
+  enum class RecreateSurfaceResult {
+    // Surface created successfully and may be used.
+    kSuccess,
+    // The target window was not valid for the specified config.
+    kInvalidTarget,
+    // Memory was not available to allocate the surface. The old
+    // surface may no longer be valid. Consider this fatal to the
+    // context.
+    kOutOfMemory,
+    // The device was lost before or during recreation.
+    kDeviceLost,
+  };
+
+  // Attempts to recreate the surface for the native_window.
+  virtual RecreateSurfaceResult RecreateSurface(Size2D size_hint) {
+    return RecreateSurfaceResult::kInvalidTarget;
+  }
+
+  // Queries the size of the backing surface, if any.
+  virtual Size2D QuerySize() { return {0, 0}; }
+
+  // Defines the swap behavior of the native window surface.
+  enum class SwapBehavior {
+    // Disable synchronization and swap immediately.
+    // Classic no-vsync mode.
+    kImmediate,
+    // Synchronize to the display rate, possibly blocking for awhile.
+    // Classic vsync mode.
+    kSynchronize,
+    // Synchronize to the display rate but allow tearing.
+    // This greatly benefits variable refresh rate (VRR) displays like gsync.
+    kSynchronizeAndTear,
+  };
+
+  // Sets the swap behavior for the native window surface.
+  virtual void SetSwapBehavior(SwapBehavior swap_behavior) {}
+
+  // Swaps presentation buffers, if created.
+  virtual bool SwapBuffers(std::chrono::milliseconds present_time_utc_millis) {
+    return false;
+  }
+
  protected:
   friend class ThreadLock;
 
   ES3PlatformContext();
 
+  // Initializes GL debugging support.
+  void InitializeDebugging();
   // Initializes the list of supported extensions to enable the various
   // extension functions.
   bool InitializeExtensions();

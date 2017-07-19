@@ -27,13 +27,14 @@
 #include "xrtl/gfx/device.h"
 #include "xrtl/gfx/framebuffer.h"
 #include "xrtl/gfx/image_view.h"
-#include "xrtl/gfx/memory_pool.h"
+#include "xrtl/gfx/memory_heap.h"
 #include "xrtl/gfx/pipeline.h"
 #include "xrtl/gfx/pipeline_layout.h"
 #include "xrtl/gfx/pixel_format.h"
 #include "xrtl/gfx/queue_fence.h"
 #include "xrtl/gfx/render_pass.h"
 #include "xrtl/gfx/resource_set.h"
+#include "xrtl/gfx/resource_set_layout.h"
 #include "xrtl/gfx/sampler.h"
 #include "xrtl/gfx/shader_module.h"
 #include "xrtl/gfx/swap_chain.h"
@@ -104,8 +105,8 @@ class Context : public RefObject<Context> {
 
   // Creates a pipeline layout.
   virtual ref_ptr<PipelineLayout> CreatePipelineLayout(
-      ArrayView<PipelineBinding> bindings,
-      ArrayView<PushConstantRange> push_constant_ranges) = 0;
+      ArrayView<ref_ptr<ResourceSetLayout>> resource_set_layouts,
+      ArrayView<PipelineLayout::PushConstantRange> push_constant_ranges) = 0;
 
   // Creates a compute pipeline with the given shader.
   virtual ref_ptr<ComputePipeline> CreateComputePipeline(
@@ -118,12 +119,18 @@ class Context : public RefObject<Context> {
       int render_subpass, RenderState render_state,
       RenderPipeline::ShaderStages shader_stages) = 0;
 
+  // Creates a resource set layout.
+  virtual ref_ptr<ResourceSetLayout> CreateResourceSetLayout(
+      ArrayView<ResourceSetLayout::BindingSlot> binding_slots) = 0;
+
   // Creates a binding set used to bind resources to pipelines.
   // A binding set is only tied to a particular pipeline layout and may be used
   // with any pipeline sharing that layout.
+  // The binding values provided must match 1:1 with the bindings as defined in
+  // the pipeline layout.
   virtual ref_ptr<ResourceSet> CreateResourceSet(
-      ref_ptr<PipelineLayout> pipeline_layout,
-      ArrayView<ResourceSet::Binding> bindings) = 0;
+      ref_ptr<ResourceSetLayout> resource_set_layout,
+      ArrayView<ResourceSet::BindingValue> binding_values) = 0;
 
   // Creates a new swap chain using the given control as a display surface.
   // The present_mode defines how the images are queued for display and
@@ -139,20 +146,20 @@ class Context : public RefObject<Context> {
       ref_ptr<ui::Control> control, SwapChain::PresentMode present_mode,
       int image_count, ArrayView<PixelFormat> pixel_formats) = 0;
 
-  // Creates a new resource memory pool.
-  // The pool can be used to create images and buffers of the given memory
+  // Creates a new resource memory heap.
+  // The heap can be used to create images and buffers of the given memory
   // type.
   //
-  // The memory pool will request hardware resources in the provided chunk size
-  // and then dole out images and buffers from those chunks. Chunk sizes
+  // The memory heap will request hardware resources in the provided heap size
+  // and then dole out images and buffers from that allocation. Heap sizes
   // should be sufficiently large to prevent frequent exhaustion but not so
   // large as to potentially run out of device memory. 64-128MB is often a good
-  // size to start with. The provided chunk size may be rounded up to alignment
+  // size to start with. The provided heap size may be rounded up to alignment
   // restrictions of the device.
   //
   // Returns nullptr if the memory type mask is invalid.
-  virtual ref_ptr<MemoryPool> CreateMemoryPool(MemoryType memory_type_mask,
-                                               size_t chunk_size) = 0;
+  virtual ref_ptr<MemoryHeap> CreateMemoryHeap(MemoryType memory_type_mask,
+                                               size_t heap_size) = 0;
 
   // Creates a new image sampler.
   virtual ref_ptr<Sampler> CreateSampler(Sampler::Params params) = 0;
@@ -259,6 +266,11 @@ class Context : public RefObject<Context> {
   std::vector<ref_ptr<Device>> devices_;
   Device::Features features_;
 };
+
+std::ostream& operator<<(std::ostream& stream,
+                         const Context::SubmitResult& value);
+std::ostream& operator<<(std::ostream& stream,
+                         const Context::WaitResult& value);
 
 }  // namespace gfx
 }  // namespace xrtl

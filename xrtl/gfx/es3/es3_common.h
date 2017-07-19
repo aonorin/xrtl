@@ -15,10 +15,15 @@
 #ifndef XRTL_GFX_ES3_ES3_COMMON_H_
 #define XRTL_GFX_ES3_ES3_COMMON_H_
 
+#if defined(XRTL_PLATFORM_WINDOWS)
+#include "xrtl/port/windows/base/windows.h"
+#endif  // XRTL_PLATFORM_WINDOWS
+
 // GLAD generated loader headers.
 // These contain all of the OpenGL ES 3 symbols and should be used instead of
 // the khronos headers.
-#include <glad/glad.h>
+// This must come after windows.h is included.
+#include <glad/glad.h>  // NOLINT(build/include_order)
 
 // Windows #define's this, which messes with our implementation.
 #undef MemoryBarrier
@@ -44,5 +49,16 @@
 #else
 #define DCHECK_CONTEXT_IS_CURRENT(context)
 #endif  // DEBUG_GL
+
+namespace xrtl {
+namespace gfx {
+namespace es3 {
+
+// TODO(benvanik): use device limits resource_set_count.
+constexpr int kMaxResourceSetCount = 4;
+
+}  // namespace es3
+}  // namespace gfx
+}  // namespace xrtl
 
 #endif  // XRTL_GFX_ES3_ES3_COMMON_H_
